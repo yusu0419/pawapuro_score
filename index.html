@@ -326,57 +326,60 @@ function Reel({ items, finalValue, runId, duration, instant, small }) {
 }
 
 // 抽選結果は、リセットを押すまで残す（画面を切り替えても、ページを開き直しても）。この端末に保存。
-const DRAW_STORE_KEY = "pawapuro_draw_v1";
-function loadDraw() {
-  const empty = { games: [], skipped: [] };
+// 「消化済みの試合」は、今のリーグの記録から自動で読み取る。
+// 3試合で1セット（全組み合わせが1回ずつ）なので、今のリーグの試合数を3で割った余りの分が、今のセットの消化済み。
+const DRAW_STORE_KEY = "pawapuro_draw_v2";
+function loadDraw(roundStart) {
   try {
-    const raw = window.localStorage.getItem(DRAW_STORE_KEY);
-    if (!raw) return empty;
-    const d = JSON.parse(raw);
-    const games = (Array.isArray(d.games) ? d.games : [])
+    const d = JSON.parse(window.localStorage.getItem(DRAW_STORE_KEY) || "null");
+    // 別のセット（記録が3試合進んだ後）の結果は引き継がない
+    if (!d || d.roundStart !== roundStart || !Array.isArray(d.games)) return [];
+    return d.games
       .filter((g) => g && PLAYERS.includes(g.first) && PLAYERS.includes(g.second) && typeof g.run === "number")
       .slice(0, 3)
       .map((g) => ({ ...g, animate: false })); // 復元した結果は回さず、そのまま表示
-    const drawn = new Set(games.map(pairKeyOf));
-    const skipped = (Array.isArray(d.skipped) ? d.skipped : []).filter((k) => PAIR_KEYS.includes(k) && !drawn.has(k));
-    return { games, skipped };
   } catch {
-    return empty;
+    return [];
   }
 }
-function saveDraw(games, skipped) {
+function saveDraw(roundStart, games) {
   try {
-    window.localStorage.setItem(
-      DRAW_STORE_KEY,
-      JSON.stringify({ games: games.map(({ animate, ...g }) => g), skipped })
-    );
+    window.localStorage.setItem(DRAW_STORE_KEY, JSON.stringify({ roundStart, games: games.map(({ animate, ...g }) => g) }));
   } catch {}
 }
 
-function DrawTab({ roster, league }) {
-  const initial = useRef(null);
-  if (initial.current === null) initial.current = loadDraw();
-  const [games, setGames] = useState(initial.current.games);       // 抽選して決まった試合
-  const [skipped, setSkipped] = useState(initial.current.skipped); // 手動で「消化済み」にした組み合わせ
+function DrawTab({ roster, league, leagueGames }) {
+  // 今のリーグの記録（古い順）から、今のセットの消化済みの組み合わせを求める
+  const ordered = [...leagueGames].sort((x, y) => (x.no || 0) - (y.no || 0) || (x.id || 0) - (y.id || 0));
+  const inRound = ordered.length % 3;
+  const roundStart = ordered.length - inRound;
+  const played = ordered.slice(roundStart).map((g) =>
+    [PLAYERS.indexOf(g.playerA), PLAYERS.indexOf(g.playerB)].sort((x, y) => x - y).join("-")
+  );
+
+  const [all, setAll] = useState(() => loadDraw(roundStart)); // 抽選して決まった試合
   const [spinning, setSpinning] = useState(false);
   const [instant, setInstant] = useState(false);
   const runCounter = useRef(0);
   const timer = useRef(null);
   useEffect(() => () => clearTimeout(timer.current), []);
-  useEffect(() => { saveDraw(games, skipped); }, [games, skipped]);
+  useEffect(() => { saveDraw(roundStart, all); }, [all, roundStart]);
+  // 記録が3試合進んでセットが変わったら、前のセットの抽選結果は捨てる
+  useEffect(() => { setAll((cur) => (cur.length ? [] : cur)); }, [roundStart]);
 
-  const drawnKeys = games.map(pairKeyOf);
-  const total = games.length + skipped.length;
+  // 記録済みになった抽選結果は「消化済み」として表示するので、抽選中の一覧からは外す
+  const games = all.filter((g) => !played.includes(pairKeyOf(g)));
+  const total = played.length + games.length;
   const done = total >= 3;
 
   function drawOne() {
     if (spinning || done) return;
-    const next = drawNext(games, roster, skipped);
+    const next = drawNext(games, roster, played);
     if (!next) return;
     clearTimeout(timer.current);
     runCounter.current += 1;
     const run = Date.now() * 10 + (runCounter.current % 10);
-    setGames((gs) => [...gs, { ...next, run, animate: true }]);
+    setAll([...games, { ...next, run, animate: true }]);
     setInstant(false);
     setSpinning(true);
     const ms = prefersReducedMotion() ? 0 : (REEL_BASE + REEL_STEP * (REEL_COUNT - 1)) * 1000 + 300;
@@ -390,25 +393,15 @@ function DrawTab({ roster, league }) {
   function reset() {
     if (!window.confirm("抽選結果を消して、最初からやり直しますか？")) return;
     clearTimeout(timer.current);
-    setGames([]);
-    setSkipped([]);
+    setAll([]);
     setSpinning(false);
     setInstant(false);
-  }
-  // すでに消化した試合の組み合わせを選ぶ（残りの試合だけを抽選できる）。全員2試合ずつなので最大2つまで。
-  function toggleSkipped(k) {
-    if (spinning || drawnKeys.includes(k)) return;
-    setSkipped((cur) => {
-      if (cur.includes(k)) return cur.filter((x) => x !== k);
-      if (games.length + cur.length >= 2) return cur;
-      return [...cur, k];
-    });
   }
 
   const dur = (k) => REEL_BASE + REEL_STEP * k;
   const last = games[games.length - 1];
   const slots = [
-    ...skipped.map((k) => ({ kind: "skipped", k })),
+    ...played.map((k) => ({ kind: "skipped", k })),
     ...games.map((g) => ({ kind: "drawn", g })),
   ];
   while (slots.length < 3) slots.push({ kind: "pending" });
@@ -417,30 +410,7 @@ function DrawTab({ roster, league }) {
   return (
     <>
       <div className="pw-drawintro">
-        1試合ずつ決めます。3試合で全員がちょうど2試合ずつ戦います。先攻・後攻と先発（第{league}期のメンバー6人）は、毎回まったくのランダムです。結果は、リセットを押すまで残ります。
-      </div>
-
-      <div className="pw-skipbox">
-        <div className="pw-skiptitle">すでに消化した試合</div>
-        <div className="pw-chips">
-          {PAIR_KEYS.map((k) => {
-            const isDrawn = drawnKeys.includes(k);
-            const on = isDrawn || skipped.includes(k);
-            const locked = isDrawn || spinning || (!on && total >= 2);
-            return (
-              <button
-                key={k}
-                className={`pw-chip${on ? " on" : ""}`}
-                disabled={locked}
-                aria-pressed={on}
-                onClick={() => toggleSkipped(k)}
-              >
-                {on ? "✓ " : ""}{pairLabel(k)}
-              </button>
-            );
-          })}
-        </div>
-        <div className="pw-skiphint">例: 2試合を消化済みにして「第3試合を決める」を押すと、残りの1試合だけを抽選できます。</div>
+        1試合ずつ決めます。3試合で全員がちょうど2試合ずつ戦います。先攻・後攻と先発（第{league}期のメンバー6人）は、毎回まったくのランダムです。今のリーグの記録から消化済みの試合を読み取って、残りの試合だけを抽選します。結果は、リセットを押すまで残ります。
       </div>
 
       <button className="pw-addbtn pw-spinbtn" onClick={drawOne} disabled={spinning || done}>
@@ -451,7 +421,7 @@ function DrawTab({ roster, league }) {
       {slots.map((slot, gi) => {
         if (slot.kind === "skipped") {
           return (
-            <div className="pw-drawcard played" key={`s${slot.k}`}>
+            <div className="pw-drawcard played" key={`s${gi}${slot.k}`}>
               <div className="pw-drawhead">第{gi + 1}試合</div>
               <div className="pw-playedrow"><b>{pairLabel(slot.k)}</b><span>消化済み</span></div>
             </div>
@@ -490,7 +460,7 @@ function DrawTab({ roster, league }) {
         );
       })}
 
-      {total > 0 && (
+      {games.length > 0 && (
         <button className="pw-resetbtn" onClick={reset}>リセット（抽選結果を消す）</button>
       )}
     </>
@@ -994,7 +964,7 @@ function PawapuroScorebook() {
         </>
       )}
 
-      {tab === "draw" && <DrawTab roster={currentRoster} league={currentLeague} />}
+      {tab === "draw" && <DrawTab roster={currentRoster} league={currentLeague} leagueGames={games.filter((g) => (g.league || 1) === currentLeague)} />}
 
       {tab === "stats" && (
         <>
