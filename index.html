@@ -89,7 +89,7 @@
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
 <script type="text/babel" data-type="module">
-const { useState, useEffect, useMemo } = React;
+const { useState, useEffect, useMemo, useRef } = React;
 
 const PLAYERS = ["左座", "長谷川", "正覚"];
 
@@ -243,6 +243,174 @@ const pct = (w, l) => {
   return r.startsWith("0") ? r.slice(1) : r;
 };
 const signed = (n) => (n > 0 ? `+${n}` : `${n}`);
+
+
+// ---- 試合抽選（スロット風・1試合ずつ） ----------------------------------
+// 3試合1セットで、全員がちょうど2試合ずつ（左座-長谷川、左座-正覚、長谷川-正覚が1回ずつ）。
+// 先攻・後攻は毎試合まったくのランダム（偏ってもよい）。
+// 先発もロースター6人から毎回まったくのランダム（同じ人が続けて投げてもよい）。
+const REEL_H = 44;
+const REEL_BASE = 1.3;   // 最初のリールが止まるまでの秒数
+const REEL_STEP = 0.6;   // 次のリールが止まるまでの間隔
+const REEL_COUNT = 4;    // 先攻・後攻・先発×2
+const prefersReducedMotion = () =>
+  !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+
+// これまでに決まった試合(games)を踏まえて、次の1試合を決める
+function drawNext(games, roster) {
+  const idx = (name) => PLAYERS.indexOf(name);
+  const allPairs = [[0, 1], [1, 2], [0, 2]];
+  const usedKeys = new Set(games.map((g) => [idx(g.first), idx(g.second)].sort().join("-")));
+  const remaining = allPairs.filter(([i, j]) => !usedKeys.has(`${i}-${j}`));
+  const [i, j] = remaining[Math.floor(Math.random() * remaining.length)];
+
+  const iFirst = Math.random() < 0.5; // 先攻・後攻は毎回コイントス
+  const first = PLAYERS[iFirst ? i : j];
+  const second = PLAYERS[iFirst ? j : i];
+  const pickStarter = (p) => {
+    const list = roster[p] || [];
+    return list.length ? list[Math.floor(Math.random() * list.length)] : "—";
+  };
+  return { first, second, firstStarter: pickStarter(first), secondStarter: pickStarter(second) };
+}
+
+// 縦に回転して止まるリール。runId が変わるたびに回り直す。instant が true になると即座に止まる。
+function Reel({ items, finalValue, runId, duration, instant, small }) {
+  const [strip, setStrip] = useState([finalValue || "?"]);
+  const [y, setY] = useState(0);
+  const [anim, setAnim] = useState(false);
+
+  useEffect(() => {
+    if (!runId) { setStrip([finalValue || "?"]); setY(0); setAnim(false); return; }
+    if (prefersReducedMotion()) { setStrip([finalValue || "—"]); setY(0); setAnim(false); return; }
+    const pool = items && items.length ? items : ["—"];
+    const n = Math.round(duration * 9) + 6;
+    const arr = [];
+    let prev = null;
+    for (let i = 0; i < n - 1; i++) {
+      let pick = pool[Math.floor(Math.random() * pool.length)];
+      if (pool.length > 1) { let guard = 0; while (pick === prev && guard++ < 8) pick = pool[Math.floor(Math.random() * pool.length)]; }
+      arr.push(pick); prev = pick;
+    }
+    arr.push(finalValue || "—");
+    setStrip(arr); setAnim(false); setY(0);
+    let raf2;
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => { setAnim(true); setY(-(arr.length - 1) * REEL_H); });
+    });
+    return () => { cancelAnimationFrame(raf1); if (raf2) cancelAnimationFrame(raf2); };
+  }, [runId]);
+
+  useEffect(() => {
+    if (!instant) return;
+    setAnim(false);
+    setY(-(strip.length - 1) * REEL_H);
+  }, [instant]);
+
+  return (
+    <div className={`pw-reel${small ? " small" : ""}`}>
+      <div
+        className="pw-reel-strip"
+        style={{
+          transform: `translateY(${y}px)`,
+          transition: anim ? `transform ${duration}s cubic-bezier(0.15, 0.7, 0.1, 1)` : "none",
+        }}
+      >
+        {strip.map((t, i) => <div className="pw-reel-item" key={i}>{t}</div>)}
+      </div>
+    </div>
+  );
+}
+
+function DrawTab({ roster, league }) {
+  const [games, setGames] = useState([]);      // 決まった試合（各試合に run 番号を付ける）
+  const [spinning, setSpinning] = useState(false);
+  const [instant, setInstant] = useState(false);
+  const runCounter = useRef(0);
+  const timer = useRef(null);
+  useEffect(() => () => clearTimeout(timer.current), []);
+
+  const done = games.length >= 3;
+  const activeIndex = games.length - 1;
+
+  function drawOne() {
+    if (spinning || done) return;
+    clearTimeout(timer.current);
+    runCounter.current += 1;
+    setGames((gs) => [...gs, { ...drawNext(gs, roster), run: runCounter.current }]);
+    setInstant(false);
+    setSpinning(true);
+    const total = prefersReducedMotion() ? 0 : (REEL_BASE + REEL_STEP * (REEL_COUNT - 1)) * 1000 + 300;
+    timer.current = setTimeout(() => setSpinning(false), total);
+  }
+  function skip() {
+    clearTimeout(timer.current);
+    setInstant(true);
+    setSpinning(false);
+  }
+  function reset() {
+    clearTimeout(timer.current);
+    setGames([]);
+    setSpinning(false);
+    setInstant(false);
+  }
+
+  const dur = (k) => REEL_BASE + REEL_STEP * k;
+  const blank = { first: "?", second: "?", firstStarter: "?", secondStarter: "?", run: 0 };
+  const slots = [0, 1, 2].map((i) => games[i] || blank);
+
+  return (
+    <>
+      <div className="pw-drawintro">
+        1試合ずつ決めます。3試合で全員がちょうど2試合ずつ戦います。先攻・後攻と先発（第{league}期のメンバー6人）は、毎回まったくのランダムです。
+      </div>
+
+      {done ? (
+        <button className="pw-addbtn pw-spinbtn" onClick={reset}>最初からやり直す</button>
+      ) : (
+        <button className="pw-addbtn pw-spinbtn" onClick={drawOne} disabled={spinning}>
+          {spinning ? "抽選中…" : `🎰 第${games.length + 1}試合を決める`}
+        </button>
+      )}
+      {spinning && <button className="pw-backlatest" onClick={skip}>結果をすぐ表示</button>}
+      {!done && !spinning && games.length > 0 && (
+        <button className="pw-backlatest" onClick={reset}>最初からやり直す</button>
+      )}
+
+      {slots.map((g, gi) => {
+        const pending = !g.run;
+        const inst = instant && gi === activeIndex;
+        return (
+          <div className={`pw-drawcard${pending ? " pending" : ""}`} key={gi}>
+            <div className="pw-drawhead">第{gi + 1}試合</div>
+            <div className="pw-drawrow">
+              <div className="pw-drawside">
+                <div className="pw-drawlabel first">先攻</div>
+                <Reel items={PLAYERS} finalValue={g.first} runId={g.run} duration={dur(0)} instant={inst} />
+              </div>
+              <div className="pw-drawvs">vs</div>
+              <div className="pw-drawside">
+                <div className="pw-drawlabel">後攻</div>
+                <Reel items={PLAYERS} finalValue={g.second} runId={g.run} duration={dur(1)} instant={inst} />
+              </div>
+            </div>
+            <div className="pw-drawrow">
+              <div className="pw-drawside">
+                <div className="pw-drawlabel">先発</div>
+                <Reel small items={roster[g.first] || []} finalValue={g.firstStarter} runId={g.run} duration={dur(2)} instant={inst} />
+              </div>
+              <div className="pw-drawvs"></div>
+              <div className="pw-drawside">
+                <div className="pw-drawlabel">先発</div>
+                <Reel small items={roster[g.second] || []} finalValue={g.secondStarter} runId={g.run} duration={dur(3)} instant={inst} />
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </>
+  );
+}
 
 // ---- 画面 -------------------------------------------------------------
 
@@ -524,6 +692,7 @@ function PawapuroScorebook() {
       <div className="pw-tabs">
         <button className={`pw-tab${tab === "league" ? " on" : ""}`} onClick={() => setTab("league")}>リーグ</button>
         <button className={`pw-tab${tab === "stats" ? " on" : ""}`} onClick={() => setTab("stats")}>通算成績</button>
+        <button className={`pw-tab${tab === "draw" ? " on" : ""}`} onClick={() => setTab("draw")}>抽選</button>
       </div>
 
       {tab === "league" && (
@@ -717,6 +886,8 @@ function PawapuroScorebook() {
         </>
       )}
 
+      {tab === "draw" && <DrawTab roster={currentRoster} league={currentLeague} />}
+
       {tab === "stats" && (
         <>
           <div className="pw-scoperow">
@@ -729,47 +900,40 @@ function PawapuroScorebook() {
             </select>
           </div>
 
-          {/* 優勝数 */}
-          <div className="pw-sectiontitle">🏆 優勝数</div>
-          <div className="pw-board">
-            {PLAYERS.map((p) => {
-              const champOfScope = statsScope === "all"
-                ? titleCount[p]
-                : (champions[statsScope] || []).includes(p) ? 1 : 0;
-              return (
-                <div className="pw-cell" key={p}>
-                  <div className="name">{p}</div>
-                  <div className="record">{champOfScope}</div>
-                  <div className="rate">回</div>
-                  <div className="pw-ranks">
-                    {[0, 1, 2].map((i) => (
-                      <span key={i}><small>{i + 1}位</small><b>{rankCounts[p][i]}</b></span>
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-          {statsScope === "all" ? (
-            Object.keys(champions).length === 0 ? (
-              <div className="pw-note">優勝はまだありません（首位と最下位の勝ち数が5勝差になると優勝が決まります）。</div>
-            ) : (
-              <div className="pw-champlist">
-                {Object.entries(champions).map(([l, list]) => (
-                  <div key={l} className="pw-champrow">
-                    <span>第{l}期{Number(l) === currentLeague ? "（進行中）" : ""}</span>
-                    {list.length > 0
-                      ? <span className="pw-champname">🏆 {list.join("・")}</span>
-                      : <span>優勝なし</span>}
+          {/* 優勝数（通算のときだけ表示。各期を選んだときは出さない） */}
+          {statsScope === "all" && (
+            <>
+              <div className="pw-sectiontitle">🏆 優勝数</div>
+              <div className="pw-board">
+                {PLAYERS.map((p) => (
+                  <div className="pw-cell" key={p}>
+                    <div className="name">{p}</div>
+                    <div className="record">{titleCount[p]}</div>
+                    <div className="rate">回</div>
+                    <div className="pw-ranks">
+                      {[0, 1, 2].map((i) => (
+                        <span key={i}><small>{i + 1}位</small><b>{rankCounts[p][i]}</b></span>
+                      ))}
+                    </div>
                   </div>
                 ))}
               </div>
-            )
-          ) : champions[statsScope] === undefined ? (
-            <div className="pw-note">第{statsScope}期はまだ優勝が決まっていません（5勝差で決定）。</div>
-          ) : champions[statsScope].length === 0 ? (
-            <div className="pw-note">第{statsScope}期は5勝差に届かないまま終了したため、優勝なしです。</div>
-          ) : null}
+              {Object.keys(champions).length === 0 ? (
+                <div className="pw-note">優勝はまだありません（首位と最下位の勝ち数が5勝差になると優勝が決まります）。</div>
+              ) : (
+                <div className="pw-champlist">
+                  {Object.entries(champions).map(([l, list]) => (
+                    <div key={l} className="pw-champrow">
+                      <span>第{l}期{Number(l) === currentLeague ? "（進行中）" : ""}</span>
+                      {list.length > 0
+                        ? <span className="pw-champname">🏆 {list.join("・")}</span>
+                        : <span>優勝なし</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
 
           {/* 勝敗・得失点 */}
           <div className="pw-sectiontitle">勝敗・得失点</div>
@@ -895,6 +1059,24 @@ ReactDOM.createRoot(document.getElementById("root")).render(<PawapuroScorebook /
   .pw-ranks span { display: flex; flex-direction: column; align-items: center; gap: 1px; }
   .pw-ranks small { font-size: 9px; color: var(--chalk-dim); letter-spacing: 0.03em; }
   .pw-ranks b { font-size: 14px; font-weight: 700; color: var(--chalk); }
+
+  /* 試合抽選 */
+  .pw-drawintro { font-size: 11px; color: var(--chalk-dim); line-height: 1.6; margin-bottom: 12px; }
+  .pw-spinbtn { margin-bottom: 8px; }
+  .pw-spinbtn:disabled { opacity: 0.6; cursor: default; }
+  .pw-drawcard { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px 12px; margin-bottom: 10px; }
+  .pw-drawcard.pending { opacity: 0.5; }
+  .pw-drawhead { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; color: var(--chalk-dim); margin-bottom: 8px; }
+  .pw-drawrow { display: grid; grid-template-columns: 1fr 22px 1fr; gap: 6px; align-items: end; margin-bottom: 8px; }
+  .pw-drawrow:last-child { margin-bottom: 0; }
+  .pw-drawlabel { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; color: var(--chalk-dim); text-align: center; margin-bottom: 3px; }
+  .pw-drawlabel.first { color: var(--amber); }
+  .pw-drawvs { font-size: 12px; color: var(--chalk-dim); text-align: center; padding-bottom: 13px; }
+  .pw-reel { position: relative; height: 44px; overflow: hidden; background: var(--field-deep); border: 1px solid var(--line); border-radius: 4px; box-shadow: inset 0 0 8px rgba(0,0,0,0.5); }
+  .pw-reel::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(180deg, rgba(0,0,0,0.6) 0%, rgba(0,0,0,0) 30%, rgba(0,0,0,0) 70%, rgba(0,0,0,0.6) 100%); }
+  .pw-reel-strip { will-change: transform; }
+  .pw-reel-item { height: 44px; display: flex; align-items: center; justify-content: center; font-size: 17px; font-weight: 700; color: var(--amber); white-space: nowrap; }
+  .pw-reel.small .pw-reel-item { font-size: 14px; color: var(--chalk); }
   .pw-gap { display: flex; align-items: baseline; justify-content: center; gap: 5px; font-size: 12px; color: var(--chalk-dim); letter-spacing: 0.04em; margin-bottom: 10px; }
   .pw-gap .pw-gap-num { font-size: 20px; font-weight: 700; color: var(--chalk); line-height: 1; }
   .pw-gap.warn .pw-gap-num { color: var(--amber); }
