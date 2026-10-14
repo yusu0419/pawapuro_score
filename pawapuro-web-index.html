@@ -1,0 +1,886 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>パワスタ — 左座・長谷川・正覚 成績帳</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #142c22; }
+  * { box-sizing: border-box; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- ====================================================================
+  設定メモ（Firebase / GitHub Pages）
+
+  ・FIREBASE_CONFIG に Firebase プロジェクトの設定値を入れてあります
+  ・Firestore のルールは下記を公開しておく必要があります
+    （3人だけで使う前提のシンプルな設定。URLを他人に教えなければ実用上問題ありません）
+
+       rules_version = '2';
+       service cloud.firestore {
+         match /databases/{database}/documents {
+           match /pawapuro/{doc} {
+             allow read, write: if true;
+           }
+         }
+       }
+
+  ・このファイル（index.html）を GitHub Pages などにアップロードすれば公開されます
+==================================================================== -->
+
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import {
+    getFirestore, doc, getDoc, setDoc, onSnapshot
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  const FIREBASE_CONFIG = {
+    apiKey: "AIzaSyC2KElzSwPTBY3JSZmmqzN3m4vFuqa-c3c",
+    authDomain: "pawapuro-d55d2.firebaseapp.com",
+    projectId: "pawapuro-d55d2",
+    storageBucket: "pawapuro-d55d2.firebasestorage.app",
+    messagingSenderId: "706885402159",
+    appId: "1:706885402159:web:60c066574bc981183b90da",
+  };
+
+  const app = initializeApp(FIREBASE_CONFIG);
+  const db = getFirestore(app);
+  const gamesRef = doc(db, "pawapuro", "games");
+
+  // 既存データ（league / rosters が無い古い形式）も壊さずに読み込む
+  function normalize(data) {
+    const games = ((data && data.list) || []).map((g) => ({ league: 1, ...g }));
+    const currentLeague = (data && data.currentLeague) || 1;
+    const rosters = (data && data.rosters) || {};
+    return { games, currentLeague, rosters };
+  }
+
+  const EMPTY = { games: [], currentLeague: 1, rosters: {} };
+
+  window.fb = {
+    async load() {
+      const snap = await getDoc(gamesRef);
+      return snap.exists() ? normalize(snap.data()) : EMPTY;
+    },
+    async save({ games, currentLeague, rosters }) {
+      await setDoc(gamesRef, { list: games, currentLeague, rosters });
+    },
+    subscribe(callback) {
+      return onSnapshot(gamesRef, (snap) => {
+        callback(snap.exists() ? normalize(snap.data()) : EMPTY);
+      });
+    },
+  };
+  window.dispatchEvent(new Event("fb-ready"));
+</script>
+
+<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script type="text/babel" data-type="module">
+const { useState, useEffect, useMemo } = React;
+
+const PLAYERS = ["左座", "長谷川", "正覚"];
+
+// 第1期の先発メンバー（新リーグ開始時は前のリーグの内容を引き継いで、あとから変更できる）
+const DEFAULT_ROSTER = {
+  左座: ["モイネロ", "大野雄大", "山野", "前田健太", "メヒア", "中村優"],
+  長谷川: ["伊藤大海", "種市", "ウィットリー", "九里", "孫", "富田"],
+  正覚: ["東", "宮城", "髙橋", "篠原", "廣池", "横川"],
+};
+const ROSTER_SIZE = 6;
+
+function getRosterFor(rosters, league) {
+  for (let l = league; l >= 1; l--) {
+    if (rosters[l]) return rosters[l];
+  }
+  return DEFAULT_ROSTER;
+}
+
+const todayStr = () => new Date().toISOString().slice(0, 10);
+
+function emptyForm() {
+  return {
+    date: todayStr(),
+    playerA: PLAYERS[0],
+    playerB: PLAYERS[1],
+    scoreA: "",
+    scoreB: "",
+    starterA: "",
+    starterB: "",
+    cold: false,
+  };
+}
+
+function resultOf(g) {
+  const a = Number(g.scoreA);
+  const b = Number(g.scoreB);
+  if (a === b) return "draw";
+  return a > b ? "A" : "B";
+}
+
+// ---- 集計 -------------------------------------------------------------
+// 勝敗はコールドを2勝(2敗)として数える（リーグ戦の規則と同じ）
+
+function computeTally(list) {
+  const t = Object.fromEntries(
+    PLAYERS.map((p) => [p, { win: 0, lose: 0, draw: 0, pf: 0, pa: 0, games: 0 }])
+  );
+  list.forEach((g) => {
+    const a = t[g.playerA];
+    const b = t[g.playerB];
+    if (!a || !b) return;
+    const w = g.cold ? 2 : 1;
+    const r = resultOf(g);
+    a.pf += Number(g.scoreA); a.pa += Number(g.scoreB);
+    b.pf += Number(g.scoreB); b.pa += Number(g.scoreA);
+    a.games += 1; b.games += 1;
+    if (r === "draw") { a.draw += 1; b.draw += 1; }
+    else if (r === "A") { a.win += w; b.lose += w; }
+    else { b.win += w; a.lose += w; }
+  });
+  return t;
+}
+
+// 対戦表: h[自分][相手] = その相手との成績
+function computeH2H(list) {
+  const h = {};
+  PLAYERS.forEach((p) => {
+    h[p] = {};
+    PLAYERS.forEach((q) => { h[p][q] = { win: 0, lose: 0, draw: 0, pf: 0, pa: 0 }; });
+  });
+  list.forEach((g) => {
+    const A = g.playerA, B = g.playerB;
+    if (!h[A] || !h[B]) return;
+    const w = g.cold ? 2 : 1;
+    const r = resultOf(g);
+    h[A][B].pf += Number(g.scoreA); h[A][B].pa += Number(g.scoreB);
+    h[B][A].pf += Number(g.scoreB); h[B][A].pa += Number(g.scoreA);
+    if (r === "draw") { h[A][B].draw += 1; h[B][A].draw += 1; }
+    else if (r === "A") { h[A][B].win += w; h[B][A].lose += w; }
+    else { h[B][A].win += w; h[A][B].lose += w; }
+  });
+  return h;
+}
+
+// 先発投手ごとの成績（勝ち負けは1試合につき1。コールドでも1として数える）
+function computePitchers(list) {
+  const map = {};
+  function add(owner, name, won, lost) {
+    if (!name) return;
+    const key = owner + "|" + name;
+    if (!map[key]) map[key] = { owner, name, starts: 0, win: 0, lose: 0 };
+    map[key].starts += 1;
+    if (won) map[key].win += 1;
+    if (lost) map[key].lose += 1;
+  }
+  list.forEach((g) => {
+    const r = resultOf(g);
+    add(g.playerA, g.starterA, r === "A", r === "B");
+    add(g.playerB, g.starterB, r === "B", r === "A");
+  });
+  return Object.values(map).sort(
+    (x, y) => y.win - x.win || x.lose - y.lose || y.starts - x.starts
+  );
+}
+
+// 優勝の定義: 首位の勝ち数が最下位の勝ち数より5以上多くなったら、首位（勝ち数が最多）の人が優勝。
+// 順位は勝ち数で決まる。5勝差に届かないままリーグを終了した場合は「優勝なし」（空配列）。
+// 進行中のリーグは、5勝差に達した時点で優勝が決まる。
+const TITLE_GAP = 5;
+function computeChampions(games, currentLeague) {
+  const result = {};
+  for (let l = 1; l <= currentLeague; l++) {
+    const lg = games.filter((g) => (g.league || 1) === l);
+    if (lg.length === 0) continue;
+    const t = computeTally(lg);
+    const wins = PLAYERS.map((p) => t[p].win);
+    const top = Math.max(...wins);
+    const bottom = Math.min(...wins);
+    if (top - bottom >= TITLE_GAP) {
+      result[l] = PLAYERS.filter((p) => t[p].win === top);
+    } else if (l < currentLeague) {
+      result[l] = [];
+    }
+  }
+  return result;
+}
+
+const pct = (w, l) => (w + l ? Math.round((w / (w + l)) * 100) : 0);
+const signed = (n) => (n > 0 ? `+${n}` : `${n}`);
+
+// ---- 画面 -------------------------------------------------------------
+
+function PawapuroScorebook() {
+  const [games, setGames] = useState([]);
+  const [currentLeague, setCurrentLeague] = useState(1);
+  const [rosters, setRosters] = useState({});
+  const [viewingLeague, setViewingLeague] = useState(1);
+  const [followLatest, setFollowLatest] = useState(true);
+  const [tab, setTab] = useState("league");
+  const [statsScope, setStatsScope] = useState("all");
+  const [showAllPitchers, setShowAllPitchers] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState(emptyForm());
+  const [error, setError] = useState("");
+  const [saveError, setSaveError] = useState("");
+  const [ready, setReady] = useState(!!window.fb);
+  const [rosterDraft, setRosterDraft] = useState(null);
+
+  function applyData(d) {
+    setGames(d.games);
+    setCurrentLeague(d.currentLeague);
+    setRosters(d.rosters || {});
+  }
+
+  useEffect(() => {
+    if (window.fb) { setReady(true); return; }
+    const onReady = () => setReady(true);
+    window.addEventListener("fb-ready", onReady);
+    return () => window.removeEventListener("fb-ready", onReady);
+  }, []);
+
+  useEffect(() => {
+    if (!ready) return;
+    let unsub;
+    (async () => {
+      try {
+        const initial = await window.fb.load();
+        applyData(initial);
+        setViewingLeague(initial.currentLeague);
+      } catch {
+        setSaveError("データの読み込みに失敗しました。設定（firebaseConfig）を確認してください。");
+      } finally {
+        setLoading(false);
+      }
+      unsub = window.fb.subscribe((data) => applyData(data));
+    })();
+    return () => unsub && unsub();
+  }, [ready]);
+
+  useEffect(() => {
+    if (followLatest) setViewingLeague(currentLeague);
+  }, [currentLeague, followLatest]);
+
+  function prevLeague() {
+    setFollowLatest(false);
+    setViewingLeague((v) => Math.max(1, v - 1));
+  }
+  function nextLeague() {
+    setViewingLeague((v) => {
+      const next = Math.min(currentLeague, v + 1);
+      setFollowLatest(next === currentLeague);
+      return next;
+    });
+  }
+  function backToLatest() {
+    setFollowLatest(true);
+    setViewingLeague(currentLeague);
+  }
+
+  // ---- リーグ画面の集計 ----
+  const leagueGames = useMemo(
+    () => games.filter((g) => (g.league || 1) === viewingLeague),
+    [games, viewingLeague]
+  );
+  const standings = useMemo(() => computeTally(leagueGames), [leagueGames]);
+
+  const wins = PLAYERS.map((p) => standings[p].win);
+  const topWin = Math.max(...wins);
+  const bottomWin = Math.min(...wins);
+  const gap = topWin - bottomWin;
+  const gapLevel = gap >= 5 ? "critical" : gap >= 3 ? "warn" : "normal";
+
+  const sortedGames = useMemo(
+    () => [...leagueGames].sort((x, y) => (x.date < y.date ? 1 : x.date > y.date ? -1 : (y.id || 0) - (x.id || 0))),
+    [leagueGames]
+  );
+
+  // ---- 通算画面の集計 ----
+  const champions = useMemo(() => computeChampions(games, currentLeague), [games, currentLeague]);
+  const statsGames = useMemo(
+    () => (statsScope === "all" ? games : games.filter((g) => (g.league || 1) === Number(statsScope))),
+    [games, statsScope]
+  );
+  const statsTally = useMemo(() => computeTally(statsGames), [statsGames]);
+  const statsH2H = useMemo(() => computeH2H(statsGames), [statsGames]);
+  const statsPitchers = useMemo(() => computePitchers(statsGames), [statsGames]);
+  const titleCount = useMemo(() => {
+    const c = Object.fromEntries(PLAYERS.map((p) => [p, 0]));
+    Object.values(champions).forEach((list) => list.forEach((p) => { c[p] += 1; }));
+    return c;
+  }, [champions]);
+
+  const currentRoster = getRosterFor(rosters, currentLeague);
+  const formRoster = getRosterFor(rosters, currentLeague);
+
+  // ---- フォーム ----
+  function updateForm(key, val) {
+    setForm((f) => ({ ...f, [key]: val }));
+  }
+  function changePlayerA(val) { setForm((f) => ({ ...f, playerA: val, starterA: "" })); }
+  function changePlayerB(val) { setForm((f) => ({ ...f, playerB: val, starterB: "" })); }
+
+  // 常に最新のデータを読み直してから書き込む（3人が別々に使っても上書きしない）
+  async function persistAll(mutate) {
+    try {
+      const latest = await window.fb.load();
+      const next = mutate(latest);
+      await window.fb.save(next);
+      applyData(next);
+      setSaveError("");
+      return next;
+    } catch {
+      setSaveError("保存に失敗しました。通信環境を確認してもう一度お試しください。");
+      return null;
+    }
+  }
+
+  async function submitForm(e) {
+    e.preventDefault();
+    if (form.playerA === form.playerB) { setError("対戦相手が同じ人になっています。"); return; }
+    if (form.scoreA === "" || form.scoreB === "") { setError("点数を入力してください。"); return; }
+    setError("");
+    const newGame = {
+      id: Date.now(),
+      date: form.date,
+      playerA: form.playerA,
+      playerB: form.playerB,
+      scoreA: Number(form.scoreA),
+      scoreB: Number(form.scoreB),
+      starterA: form.starterA,
+      starterB: form.starterB,
+      cold: form.cold,
+      league: currentLeague,
+    };
+    await persistAll((latest) => ({ ...latest, games: [...latest.games, newGame] }));
+    setForm(emptyForm());
+    setShowForm(false);
+  }
+
+  async function deleteGame(id) {
+    await persistAll((latest) => ({ ...latest, games: latest.games.filter((g) => g.id !== id) }));
+  }
+
+  // ---- リーグ移行 ----
+  function openRosterEditor(league, rostersObj) {
+    const r = getRosterFor(rostersObj, league);
+    const draft = {};
+    PLAYERS.forEach((p) => {
+      draft[p] = Array.from({ length: ROSTER_SIZE }, (_, i) => (r[p] && r[p][i]) || "");
+    });
+    setRosterDraft(draft);
+  }
+
+  async function startNewLeague() {
+    const ok = window.confirm(
+      `第${currentLeague}期を終了して、第${currentLeague + 1}期を始めますか？\nこれまでの記録は消えず、「通算成績」にも反映されます。`
+    );
+    if (!ok) return;
+    const next = await persistAll((latest) => {
+      const n = latest.currentLeague + 1;
+      const prevRoster = getRosterFor(latest.rosters, latest.currentLeague);
+      return {
+        games: latest.games,
+        currentLeague: n,
+        rosters: { ...latest.rosters, [n]: prevRoster },
+      };
+    });
+    if (!next) return;
+    setFollowLatest(true);
+    setViewingLeague(next.currentLeague);
+    setTab("league");
+    // 新しいチームの先発メンバーをすぐ登録できるように編集画面を開く
+    openRosterEditor(next.currentLeague, next.rosters);
+  }
+
+  function updateDraft(player, idx, val) {
+    setRosterDraft((d) => ({ ...d, [player]: d[player].map((v, i) => (i === idx ? val : v)) }));
+  }
+
+  async function saveRoster() {
+    const cleaned = {};
+    PLAYERS.forEach((p) => {
+      cleaned[p] = rosterDraft[p].map((s) => s.trim()).filter((s) => s !== "");
+    });
+    const next = await persistAll((latest) => ({
+      ...latest,
+      rosters: { ...latest.rosters, [latest.currentLeague]: cleaned },
+    }));
+    if (next) {
+      setRosterDraft(null);
+      setForm(emptyForm());
+    }
+  }
+
+  const isLatest = viewingLeague === currentLeague;
+  const shownPitchers = showAllPitchers ? statsPitchers : statsPitchers.slice(0, 10);
+  const topPitcherWin = statsPitchers.length ? statsPitchers[0].win : 0;
+
+  return (
+    <div className="pw-root">
+      <div className="pw-header">
+        <div className="pw-title">
+          パワスタ
+          <small>左座 / 長谷川 / 正覚 — 成績帳</small>
+        </div>
+      </div>
+
+      {saveError && <div className="pw-savewarn">{saveError}</div>}
+
+      <div className="pw-tabs">
+        <button className={`pw-tab${tab === "league" ? " on" : ""}`} onClick={() => setTab("league")}>リーグ</button>
+        <button className={`pw-tab${tab === "stats" ? " on" : ""}`} onClick={() => setTab("stats")}>通算成績</button>
+      </div>
+
+      {tab === "league" && (
+        <>
+          <div className="pw-leaguebar">
+            <button className="pw-leaguenav" onClick={prevLeague} disabled={viewingLeague <= 1}>‹</button>
+            <div className="pw-leaguelabel">
+              第{viewingLeague}期
+              {!isLatest && <span className="pw-leaguepast">過去のリーグ</span>}
+            </div>
+            <button className="pw-leaguenav" onClick={nextLeague} disabled={viewingLeague >= currentLeague}>›</button>
+          </div>
+          {!isLatest && (
+            <button className="pw-backlatest" onClick={backToLatest}>最新の第{currentLeague}期に戻る</button>
+          )}
+
+          <div className="pw-board">
+            {PLAYERS.map((p) => {
+              const s = standings[p];
+              const rate = pct(s.win, s.lose);
+              const isLeader = s.win === topWin && topWin > bottomWin;
+              return (
+                <div className={`pw-cell${isLeader ? " leader" : ""}`} key={p}>
+                  <div className="name">{isLeader && "🏆 "}{p}</div>
+                  <div className="record">{s.win}<span className="sep">-</span>{s.lose}</div>
+                  <div className="rate">勝率 {rate}%{s.draw ? ` / 分${s.draw}` : ""}</div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className={`pw-gap ${gapLevel}`}>
+            <span>首位差</span>
+            <span className="pw-gap-num">{gap}</span>
+            <span>勝</span>
+            {gap >= 5 && <span className="pw-gap-tag">🏁 決着ライン到達</span>}
+          </div>
+
+          {isLatest && (
+            <div className="pw-actions">
+              <button className="pw-newleague" onClick={startNewLeague}>
+                {gap >= 5 ? "🏆 このリーグを終了して次のリーグへ" : "リーグを終了して次のリーグへ"}
+              </button>
+              <button className="pw-rosterbtn" onClick={() => openRosterEditor(currentLeague, rosters)}>
+                第{currentLeague}期の先発メンバーを編集
+              </button>
+            </div>
+          )}
+
+          {isLatest && rosterDraft && (
+            <div className="pw-form">
+              <div className="pw-form-head">
+                <span>第{currentLeague}期 先発メンバー</span>
+                <button type="button" onClick={() => setRosterDraft(null)}>✕</button>
+              </div>
+              <div className="pw-rosterhint">チームが変わったら、それぞれの先発6人を入力してください（空欄は無視されます）。過去の記録は変わりません。</div>
+              <div className="pw-rostergrid">
+                {PLAYERS.map((p) => (
+                  <div key={p}>
+                    <div className="pw-rostername">{p}</div>
+                    {rosterDraft[p].map((val, i) => (
+                      <input
+                        key={i}
+                        className="pw-input pw-rosterinput"
+                        type="text"
+                        placeholder={`${i + 1}`}
+                        value={val}
+                        onChange={(e) => updateDraft(p, i, e.target.value)}
+                      />
+                    ))}
+                  </div>
+                ))}
+              </div>
+              <button className="pw-submit" type="button" onClick={saveRoster}>この内容で保存</button>
+            </div>
+          )}
+
+          {isLatest ? (
+            !showForm && (
+              <button className="pw-addbtn" onClick={() => setShowForm(true)}>＋ 試合を記録する</button>
+            )
+          ) : (
+            <div className="pw-empty">過去のリーグは閲覧のみです。記録するには最新のリーグに戻ってください。</div>
+          )}
+
+          {showForm && isLatest && (
+            <form className="pw-form" onSubmit={submitForm}>
+              <div className="pw-form-head">
+                <span>試合を記録</span>
+                <button type="button" onClick={() => { setShowForm(false); setError(""); }}>✕</button>
+              </div>
+
+              <div className="pw-row">
+                <div>
+                  <label className="pw-label">日付</label>
+                  <input className="pw-input" type="date" value={form.date} onChange={(e) => updateForm("date", e.target.value)} />
+                </div>
+              </div>
+
+              <div className="pw-row">
+                <div>
+                  <label className="pw-label">プレイヤーA</label>
+                  <select className="pw-select" value={form.playerA} onChange={(e) => changePlayerA(e.target.value)}>
+                    {PLAYERS.map((p) => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                </div>
+                <div className="pw-vs">vs</div>
+                <div>
+                  <label className="pw-label">プレイヤーB</label>
+                  <select className="pw-select" value={form.playerB} onChange={(e) => changePlayerB(e.target.value)}>
+                    {PLAYERS.map((p) => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              <div className="pw-row">
+                <div>
+                  <label className="pw-label">{form.playerA} 得点</label>
+                  <input className="pw-input" type="number" inputMode="numeric" value={form.scoreA} onChange={(e) => updateForm("scoreA", e.target.value)} />
+                </div>
+                <div>
+                  <label className="pw-label">{form.playerB} 得点</label>
+                  <input className="pw-input" type="number" inputMode="numeric" value={form.scoreB} onChange={(e) => updateForm("scoreB", e.target.value)} />
+                </div>
+              </div>
+
+              <div className="pw-row">
+                <div>
+                  <label className="pw-label">{form.playerA} 先発</label>
+                  <select className="pw-select" value={form.starterA} onChange={(e) => updateForm("starterA", e.target.value)}>
+                    <option value="">選択してください</option>
+                    {(formRoster[form.playerA] || []).map((name, i) => <option key={name + i} value={name}>{`${i + 1}. ${name}`}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="pw-label">{form.playerB} 先発</label>
+                  <select className="pw-select" value={form.starterB} onChange={(e) => updateForm("starterB", e.target.value)}>
+                    <option value="">選択してください</option>
+                    {(formRoster[form.playerB] || []).map((name, i) => <option key={name + i} value={name}>{`${i + 1}. ${name}`}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              <label className="pw-cold-row">
+                <input type="checkbox" checked={form.cold} onChange={(e) => updateForm("cold", e.target.checked)} />
+                コールド勝ち（勝敗を2としてカウント）
+              </label>
+
+              {error && <div className="pw-error">{error}</div>}
+
+              <button className="pw-submit" type="submit">この試合を保存</button>
+            </form>
+          )}
+
+          <div className="pw-loglabel">試合ログ</div>
+
+          {loading ? (
+            <div className="pw-empty">読み込み中…</div>
+          ) : sortedGames.length === 0 ? (
+            <div className="pw-empty">まだ記録がありません。<br />上のボタンから最初の試合を記録しましょう。</div>
+          ) : (
+            sortedGames.map((g) => {
+              const r = resultOf(g);
+              return (
+                <div className={`pw-card${g.cold ? " cold" : ""}`} key={g.id}>
+                  <div className="pw-card-top">
+                    <span className="pw-date">{g.date}</span>
+                    <div className="pw-badges">
+                      {g.cold && <span className="pw-badge">🔥 コールド</span>}
+                      {isLatest && <button className="pw-del" onClick={() => deleteGame(g.id)}>🗑</button>}
+                    </div>
+                  </div>
+                  <div className="pw-matchup">
+                    <div className={`pw-side ${r === "A" ? "win" : r === "B" ? "lose" : ""}`}>
+                      <div className="pname">{g.playerA}</div>
+                      <div className="pscore">{g.scoreA}</div>
+                      <div className="starter">{g.starterA}</div>
+                    </div>
+                    <div className="pw-dash">–</div>
+                    <div className={`pw-side ${r === "B" ? "win" : r === "A" ? "lose" : ""}`}>
+                      <div className="pname">{g.playerB}</div>
+                      <div className="pscore">{g.scoreB}</div>
+                      <div className="starter">{g.starterB}</div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </>
+      )}
+
+      {tab === "stats" && (
+        <>
+          <div className="pw-scoperow">
+            <label className="pw-label">集計の範囲</label>
+            <select className="pw-select" value={statsScope} onChange={(e) => setStatsScope(e.target.value)}>
+              <option value="all">通算（全リーグ）</option>
+              {Array.from({ length: currentLeague }, (_, i) => i + 1).map((l) => (
+                <option key={l} value={l}>第{l}期{l === currentLeague ? "（進行中）" : ""}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* 優勝数 */}
+          <div className="pw-sectiontitle">🏆 優勝数</div>
+          <div className="pw-board">
+            {PLAYERS.map((p) => {
+              const champOfScope = statsScope === "all"
+                ? titleCount[p]
+                : (champions[statsScope] || []).includes(p) ? 1 : 0;
+              return (
+                <div className={`pw-cell${champOfScope > 0 ? " leader" : ""}`} key={p}>
+                  <div className="name">{p}</div>
+                  <div className="record">{champOfScope}</div>
+                  <div className="rate">回</div>
+                </div>
+              );
+            })}
+          </div>
+          {statsScope === "all" ? (
+            Object.keys(champions).length === 0 ? (
+              <div className="pw-note">優勝はまだありません（首位と最下位の勝ち数が5勝差になると優勝が決まります）。</div>
+            ) : (
+              <div className="pw-champlist">
+                {Object.entries(champions).map(([l, list]) => (
+                  <div key={l} className="pw-champrow">
+                    <span>第{l}期{Number(l) === currentLeague ? "（進行中）" : ""}</span>
+                    {list.length > 0
+                      ? <span className="pw-champname">🏆 {list.join("・")}</span>
+                      : <span>優勝なし</span>}
+                  </div>
+                ))}
+              </div>
+            )
+          ) : champions[statsScope] === undefined ? (
+            <div className="pw-note">第{statsScope}期はまだ優勝が決まっていません（5勝差で決定）。</div>
+          ) : champions[statsScope].length === 0 ? (
+            <div className="pw-note">第{statsScope}期は5勝差に届かないまま終了したため、優勝なしです。</div>
+          ) : null}
+
+          {/* 勝敗・得失点 */}
+          <div className="pw-sectiontitle">勝敗・得失点</div>
+          <div className="pw-table">
+            <div className="pw-tr head t-record">
+              <span>名前</span><span>勝-敗</span><span>勝率</span><span>得点</span><span>失点</span><span>差</span>
+            </div>
+            {PLAYERS.map((p) => {
+              const s = statsTally[p];
+              const diff = s.pf - s.pa;
+              return (
+                <div className="pw-tr t-record" key={p}>
+                  <span className="strong">{p}</span>
+                  <span>{s.win}-{s.lose}{s.draw ? <em>({s.draw}分)</em> : null}</span>
+                  <span>{pct(s.win, s.lose)}%</span>
+                  <span>{s.pf}</span>
+                  <span>{s.pa}</span>
+                  <span className={diff > 0 ? "plus" : diff < 0 ? "minus" : ""}>{signed(diff)}</span>
+                </div>
+              );
+            })}
+          </div>
+          <div className="pw-note">コールド勝ちは2勝(2敗)として数えています。</div>
+
+          {/* 対戦表 */}
+          <div className="pw-sectiontitle">対戦表</div>
+          <div className="pw-h2h">
+            <div className="pw-h2h-row head">
+              <span></span>
+              {PLAYERS.map((q) => <span key={q}>vs {q}</span>)}
+            </div>
+            {PLAYERS.map((p) => (
+              <div className="pw-h2h-row" key={p}>
+                <span className="pw-h2h-name">{p}</span>
+                {PLAYERS.map((q) => {
+                  if (p === q) return <span key={q} className="pw-h2h-self">—</span>;
+                  const c = statsH2H[p][q];
+                  const state = c.win > c.lose ? "up" : c.win < c.lose ? "down" : "";
+                  return (
+                    <span key={q} className={`pw-h2h-cell ${state}`}>
+                      <b>{c.win}-{c.lose}</b>
+                      <small>{c.pf}-{c.pa}</small>
+                    </span>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+          <div className="pw-note">大きい数字が勝敗、小さい数字が得点-失点（行の人から見た成績）。</div>
+
+          {/* 先発別 */}
+          <div className="pw-sectiontitle">先発 最多勝</div>
+          {statsPitchers.length === 0 ? (
+            <div className="pw-empty">先発を選んで記録した試合がまだありません。</div>
+          ) : (
+            <>
+              <div className="pw-table">
+                <div className="pw-tr head t-pitch">
+                  <span>#</span><span>投手</span><span>登板</span><span>勝</span><span>敗</span>
+                </div>
+                {shownPitchers.map((pt, i) => (
+                  <div className="pw-tr t-pitch" key={pt.owner + pt.name}>
+                    <span>{pt.win === topPitcherWin && pt.win > 0 ? "🥇" : i + 1}</span>
+                    <span className="strong">{pt.name}<em>{pt.owner}</em></span>
+                    <span>{pt.starts}</span>
+                    <span className="plus">{pt.win}</span>
+                    <span>{pt.lose}</span>
+                  </div>
+                ))}
+              </div>
+              {statsPitchers.length > 10 && (
+                <button className="pw-backlatest" onClick={() => setShowAllPitchers((v) => !v)}>
+                  {showAllPitchers ? "上位10人だけ表示" : `すべて表示（${statsPitchers.length}人）`}
+                </button>
+              )}
+              <div className="pw-note">先発投手のチームが勝った試合を勝ちとして数えています（コールドでも1勝）。</div>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<PawapuroScorebook />);
+</script>
+
+<style>
+  .pw-root {
+    --field: #142c22; --field-deep: #0d1d16; --chalk: #f3efe1; --chalk-dim: #b9c4b8;
+    --amber: #f0a83b; --amber-dim: #a97b32; --foul: #d1544a; --panel: #0f1b16; --line: rgba(243,239,225,0.14);
+    font-family: 'Zen Kaku Gothic New', 'Hiragino Sans', sans-serif;
+    background: var(--field);
+    background-image: repeating-linear-gradient(90deg, rgba(255,255,255,0.025) 0 2px, transparent 2px 46px);
+    color: var(--chalk); min-height: 100vh; padding: 18px 14px 40px; box-sizing: border-box;
+    max-width: 640px; margin: 0 auto;
+  }
+  .pw-root * { box-sizing: border-box; }
+  .pw-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; padding-bottom: 12px; border-bottom: 2px solid var(--line); }
+  .pw-title { font-weight: 700; font-size: 30px; letter-spacing: 0.04em; color: var(--chalk); line-height: 1; }
+  .pw-title small { display: block; font-size: 11px; font-weight: 700; letter-spacing: 0.18em; color: var(--chalk-dim); margin-top: 4px; }
+
+  .pw-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+  .pw-tab { flex: 1; background: var(--panel); border: 1px solid var(--line); color: var(--chalk-dim); border-radius: 4px; padding: 9px; font-size: 13px; font-weight: 700; letter-spacing: 0.05em; cursor: pointer; font-family: inherit; }
+  .pw-tab.on { background: var(--amber); color: #1a1206; border-color: var(--amber); }
+
+  .pw-leaguebar { display: flex; align-items: center; justify-content: center; gap: 14px; margin-bottom: 4px; }
+  .pw-leaguenav { background: var(--panel); border: 1px solid var(--line); color: var(--chalk); width: 30px; height: 30px; border-radius: 4px; font-size: 16px; cursor: pointer; }
+  .pw-leaguenav:disabled { opacity: 0.3; cursor: default; }
+  .pw-leaguelabel { font-size: 15px; font-weight: 700; letter-spacing: 0.06em; color: var(--chalk); display: flex; align-items: center; gap: 6px; }
+  .pw-leaguepast { font-size: 10px; font-weight: 700; color: var(--amber); background: rgba(240,168,59,0.14); padding: 2px 6px; border-radius: 3px; letter-spacing: 0.04em; }
+  .pw-backlatest { display: block; margin: 6px auto 12px; background: none; border: 1px solid var(--line); color: var(--chalk-dim); font-size: 11px; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-family: inherit; }
+
+  .pw-board { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; margin-bottom: 10px; }
+  .pw-cell { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 10px 6px 8px; text-align: center; }
+  .pw-cell.leader { border-color: var(--amber-dim); box-shadow: 0 0 0 1px var(--amber-dim) inset; }
+  .pw-cell .name { font-size: 12px; font-weight: 700; color: var(--chalk-dim); letter-spacing: 0.05em; margin-bottom: 6px; }
+  .pw-cell .record { font-size: 28px; font-weight: 700; letter-spacing: 0.02em; color: var(--amber); text-shadow: 0 0 10px rgba(240,168,59,0.35); line-height: 1; }
+  .pw-cell .record .sep { color: var(--chalk-dim); font-size: 20px; margin: 0 2px; }
+  .pw-cell .rate { margin-top: 4px; font-size: 10px; color: var(--chalk-dim); letter-spacing: 0.05em; }
+
+  .pw-gap { display: flex; align-items: baseline; justify-content: center; gap: 5px; font-size: 12px; color: var(--chalk-dim); letter-spacing: 0.04em; margin-bottom: 10px; }
+  .pw-gap .pw-gap-num { font-size: 20px; font-weight: 700; color: var(--chalk); line-height: 1; }
+  .pw-gap.warn .pw-gap-num { color: var(--amber); }
+  .pw-gap.critical .pw-gap-num { color: var(--foul); }
+  .pw-gap-tag { font-size: 10px; font-weight: 700; color: var(--foul); background: rgba(209,84,74,0.16); padding: 2px 7px; border-radius: 3px; margin-left: 4px; }
+
+  .pw-actions { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+  .pw-newleague { width: 100%; background: transparent; border: 1px solid var(--foul); color: var(--foul); border-radius: 4px; padding: 9px; font-size: 12px; font-weight: 700; letter-spacing: 0.03em; cursor: pointer; font-family: inherit; }
+  .pw-rosterbtn { width: 100%; background: transparent; border: 1px solid var(--line); color: var(--chalk-dim); border-radius: 4px; padding: 8px; font-size: 12px; font-weight: 700; letter-spacing: 0.03em; cursor: pointer; font-family: inherit; }
+
+  .pw-rosterhint { font-size: 11px; color: var(--chalk-dim); line-height: 1.5; margin-bottom: 10px; }
+  .pw-rostergrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
+  .pw-rostername { font-size: 12px; font-weight: 700; color: var(--amber); margin-bottom: 4px; text-align: center; }
+  .pw-rosterinput { margin-bottom: 5px; padding: 7px 6px; font-size: 13px; }
+
+  .pw-addbtn { width: 100%; background: var(--amber); color: #1a1206; border: none; border-radius: 4px; padding: 11px; font-size: 14px; font-weight: 700; letter-spacing: 0.04em; margin-bottom: 16px; cursor: pointer; font-family: inherit; }
+  .pw-form { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px; margin-bottom: 18px; }
+  .pw-form-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+  .pw-form-head span { font-size: 16px; letter-spacing: 0.05em; font-weight: 700; }
+  .pw-form-head button { background: none; border: none; color: var(--chalk-dim); cursor: pointer; font-size: 16px; }
+  .pw-row { display: flex; gap: 8px; margin-bottom: 10px; }
+  .pw-row > div { flex: 1; }
+  .pw-label { display: block; font-size: 10px; color: var(--chalk-dim); letter-spacing: 0.06em; margin-bottom: 4px; }
+  .pw-input, .pw-select { width: 100%; background: var(--field-deep); border: 1px solid var(--line); border-radius: 4px; color: var(--chalk); padding: 8px; font-size: 14px; font-family: inherit; }
+  .pw-vs { text-align: center; font-size: 14px; color: var(--chalk-dim); padding-top: 18px; }
+  .pw-cold-row { display: flex; align-items: center; gap: 8px; margin: 4px 0 14px; font-size: 13px; color: var(--chalk); }
+  .pw-cold-row input { width: 16px; height: 16px; accent-color: var(--amber); }
+  .pw-submit { width: 100%; background: var(--amber); color: #1a1206; border: none; border-radius: 4px; padding: 10px; font-weight: 700; font-size: 14px; cursor: pointer; font-family: inherit; }
+  .pw-error { color: var(--foul); font-size: 12px; margin-bottom: 8px; }
+  .pw-loglabel { font-size: 16px; letter-spacing: 0.08em; color: var(--chalk-dim); margin: 4px 0 8px; font-weight: 700; }
+  .pw-empty { text-align: center; color: var(--chalk-dim); font-size: 13px; padding: 30px 10px; border: 1px dashed var(--line); border-radius: 6px; margin-bottom: 14px; }
+  .pw-card { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--amber-dim); border-radius: 4px; padding: 10px 12px; margin-bottom: 8px; }
+  .pw-card.cold { border-left-color: var(--foul); }
+  .pw-card-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .pw-date { font-size: 11px; color: var(--chalk-dim); letter-spacing: 0.04em; }
+  .pw-badges { display: flex; gap: 6px; align-items: center; }
+  .pw-badge { font-size: 10px; font-weight: 700; letter-spacing: 0.04em; padding: 2px 6px; border-radius: 3px; background: rgba(209,84,74,0.18); color: var(--foul); }
+  .pw-del { background: none; border: none; color: var(--chalk-dim); cursor: pointer; font-size: 13px; }
+  .pw-matchup { display: flex; align-items: center; justify-content: space-between; }
+  .pw-side { flex: 1; text-align: center; }
+  .pw-side .pname { font-size: 13px; font-weight: 700; margin-bottom: 2px; }
+  .pw-side.win .pname { color: var(--amber); }
+  .pw-side.lose .pname { color: var(--chalk-dim); }
+  .pw-side .pscore { font-size: 24px; font-weight: 700; line-height: 1; }
+  .pw-side.win .pscore { color: var(--amber); }
+  .pw-side.lose .pscore { color: var(--chalk-dim); }
+  .pw-side .starter { font-size: 10px; color: var(--chalk-dim); margin-top: 2px; min-height: 12px; }
+  .pw-dash { font-size: 16px; color: var(--chalk-dim); padding: 0 8px; }
+  .pw-savewarn { font-size: 11px; color: var(--foul); text-align: center; margin-bottom: 10px; }
+
+  /* 通算成績 */
+  .pw-scoperow { margin-bottom: 4px; }
+  .pw-sectiontitle { font-size: 15px; font-weight: 700; letter-spacing: 0.06em; color: var(--chalk); margin: 20px 0 8px; padding-left: 8px; border-left: 3px solid var(--amber); }
+  .pw-note { font-size: 10px; color: var(--chalk-dim); line-height: 1.5; margin: 6px 0 4px; }
+  .pw-champlist { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 4px 12px; }
+  .pw-champrow { display: flex; justify-content: space-between; align-items: center; padding: 7px 0; font-size: 13px; color: var(--chalk-dim); border-bottom: 1px solid var(--line); }
+  .pw-champrow:last-child { border-bottom: none; }
+  .pw-champname { color: var(--amber); font-weight: 700; }
+
+  .pw-table { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .pw-tr { display: grid; align-items: center; gap: 4px; padding: 9px 10px; font-size: 13px; text-align: center; border-bottom: 1px solid var(--line); }
+  .pw-tr:last-child { border-bottom: none; }
+  .pw-tr.head { font-size: 10px; color: var(--chalk-dim); letter-spacing: 0.05em; background: rgba(255,255,255,0.03); padding: 7px 10px; }
+  .pw-tr.t-record { grid-template-columns: 1.3fr 1.3fr 1fr 1fr 1fr 1fr; }
+  .pw-tr.t-pitch { grid-template-columns: 30px 1fr 44px 40px 40px; }
+  .pw-tr .strong { font-weight: 700; color: var(--chalk); text-align: left; }
+  .pw-tr.t-record .strong { text-align: center; }
+  .pw-tr em { display: block; font-style: normal; font-size: 10px; color: var(--chalk-dim); font-weight: 500; }
+  .pw-tr .plus { color: var(--amber); font-weight: 700; }
+  .pw-tr .minus { color: var(--foul); font-weight: 700; }
+
+  .pw-h2h { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .pw-h2h-row { display: grid; grid-template-columns: 0.9fr 1fr 1fr 1fr; align-items: stretch; border-bottom: 1px solid var(--line); text-align: center; }
+  .pw-h2h-row:last-child { border-bottom: none; }
+  .pw-h2h-row.head { font-size: 10px; color: var(--chalk-dim); background: rgba(255,255,255,0.03); }
+  .pw-h2h-row.head span { padding: 7px 2px; }
+  .pw-h2h-name { display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; color: var(--chalk); padding: 8px 2px; border-right: 1px solid var(--line); }
+  .pw-h2h-self { display: flex; align-items: center; justify-content: center; color: var(--chalk-dim); opacity: 0.4; background: rgba(255,255,255,0.02); }
+  .pw-h2h-cell { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 8px 2px; gap: 2px; border-left: 1px solid var(--line); }
+  .pw-h2h-cell b { font-size: 16px; font-weight: 700; color: var(--chalk); }
+  .pw-h2h-cell small { font-size: 10px; color: var(--chalk-dim); }
+  .pw-h2h-cell.up b { color: var(--amber); }
+  .pw-h2h-cell.down b { color: var(--foul); }
+</style>
+
+</body>
+</html>
