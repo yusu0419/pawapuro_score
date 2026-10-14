@@ -421,6 +421,7 @@ function PawapuroScorebook() {
   const [viewingLeague, setViewingLeague] = useState(1);
   const [followLatest, setFollowLatest] = useState(true);
   const [tab, setTab] = useState("league");
+  const [tabBeforeDraw, setTabBeforeDraw] = useState("league");
   const [statsScope, setStatsScope] = useState("all");
   const [showAllPitchers, setShowAllPitchers] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -662,6 +663,13 @@ function PawapuroScorebook() {
     }
   }
 
+  // 右上のサイコロ: 抽選画面を開く／もう一度押すと元のタブに戻る
+  function toggleDraw() {
+    if (tab === "draw") { setTab(tabBeforeDraw); return; }
+    setTabBeforeDraw(tab);
+    setTab("draw");
+  }
+
   const isLatest = viewingLeague === currentLeague;
   const shownPitchers = showAllPitchers ? statsPitchers : statsPitchers.slice(0, 10);
   const topPitcherWin = statsPitchers.length ? statsPitchers[0].win : 0;
@@ -673,6 +681,22 @@ function PawapuroScorebook() {
           パワスタ
           <small>左座 / 長谷川 / 正覚 — 成績帳</small>
         </div>
+        <button
+          className={`pw-dicebtn${tab === "draw" ? " on" : ""}`}
+          onClick={toggleDraw}
+          aria-label="試合抽選"
+          aria-pressed={tab === "draw"}
+          title="試合抽選"
+        >
+          <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" aria-hidden="true">
+            <rect x="3.5" y="3.5" width="17" height="17" rx="3.5" />
+            <circle cx="8.5" cy="8.5" r="1.3" fill="currentColor" stroke="none" />
+            <circle cx="15.5" cy="8.5" r="1.3" fill="currentColor" stroke="none" />
+            <circle cx="12" cy="12" r="1.3" fill="currentColor" stroke="none" />
+            <circle cx="8.5" cy="15.5" r="1.3" fill="currentColor" stroke="none" />
+            <circle cx="15.5" cy="15.5" r="1.3" fill="currentColor" stroke="none" />
+          </svg>
+        </button>
       </div>
 
       {saveError && <div className="pw-savewarn">{saveError}</div>}
@@ -692,7 +716,6 @@ function PawapuroScorebook() {
       <div className="pw-tabs">
         <button className={`pw-tab${tab === "league" ? " on" : ""}`} onClick={() => setTab("league")}>リーグ</button>
         <button className={`pw-tab${tab === "stats" ? " on" : ""}`} onClick={() => setTab("stats")}>通算成績</button>
-        <button className={`pw-tab${tab === "draw" ? " on" : ""}`} onClick={() => setTab("draw")}>抽選</button>
       </div>
 
       {tab === "league" && (
@@ -1032,10 +1055,12 @@ ReactDOM.createRoot(document.getElementById("root")).render(<PawapuroScorebook /
     max-width: 640px; margin: 0 auto;
   }
   .pw-root * { box-sizing: border-box; }
-  .pw-header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; padding-bottom: 12px; border-bottom: 2px solid var(--line); }
+  .pw-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; padding-bottom: 12px; border-bottom: 2px solid var(--line); }
   .pw-title { font-weight: 700; font-size: 30px; letter-spacing: 0.04em; color: var(--chalk); line-height: 1; }
   .pw-title small { display: block; font-size: 11px; font-weight: 700; letter-spacing: 0.18em; color: var(--chalk-dim); margin-top: 4px; }
 
+  .pw-dicebtn { flex: none; width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; color: var(--chalk-dim); cursor: pointer; }
+  .pw-dicebtn.on { background: var(--amber); border-color: var(--amber); color: #1a1206; }
   .pw-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
   .pw-tab { flex: 1; background: var(--panel); border: 1px solid var(--line); color: var(--chalk-dim); border-radius: 4px; padding: 9px; font-size: 13px; font-weight: 700; letter-spacing: 0.05em; cursor: pointer; font-family: inherit; }
   .pw-tab.on { background: var(--amber); color: #1a1206; border-color: var(--amber); }
