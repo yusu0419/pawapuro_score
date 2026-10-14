@@ -256,14 +256,17 @@ const REEL_COUNT = 4;    // 先攻・後攻・先発×2
 const prefersReducedMotion = () =>
   !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
 
-// これまでに決まった試合(games)を踏まえて、次の1試合を決める
-function drawNext(games, roster) {
-  const idx = (name) => PLAYERS.indexOf(name);
-  const allPairs = [[0, 1], [1, 2], [0, 2]];
-  const usedKeys = new Set(games.map((g) => [idx(g.first), idx(g.second)].sort().join("-")));
-  const remaining = allPairs.filter(([i, j]) => !usedKeys.has(`${i}-${j}`));
-  const [i, j] = remaining[Math.floor(Math.random() * remaining.length)];
+// 組み合わせのキー: 0=左座 1=長谷川 2=正覚 の番号で "0-1" / "0-2" / "1-2"
+const PAIR_KEYS = ["0-1", "0-2", "1-2"];
+const pairLabel = (k) => k.split("-").map((i) => PLAYERS[Number(i)]).join(" vs ");
+const pairKeyOf = (g) => [PLAYERS.indexOf(g.first), PLAYERS.indexOf(g.second)].sort((x, y) => x - y).join("-");
 
+// これまでに決まった試合(games)と、手動で「消化済み」にした組み合わせ(skipped)を除いて、次の1試合を決める
+function drawNext(games, roster, skipped) {
+  const used = new Set([...games.map(pairKeyOf), ...skipped]);
+  const remaining = PAIR_KEYS.filter((k) => !used.has(k));
+  if (remaining.length === 0) return null;
+  const [i, j] = remaining[Math.floor(Math.random() * remaining.length)].split("-").map(Number);
   const iFirst = Math.random() < 0.5; // 先攻・後攻は毎回コイントス
   const first = PLAYERS[iFirst ? i : j];
   const second = PLAYERS[iFirst ? j : i];
@@ -322,26 +325,62 @@ function Reel({ items, finalValue, runId, duration, instant, small }) {
   );
 }
 
+// 抽選結果は、リセットを押すまで残す（画面を切り替えても、ページを開き直しても）。この端末に保存。
+const DRAW_STORE_KEY = "pawapuro_draw_v1";
+function loadDraw() {
+  const empty = { games: [], skipped: [] };
+  try {
+    const raw = window.localStorage.getItem(DRAW_STORE_KEY);
+    if (!raw) return empty;
+    const d = JSON.parse(raw);
+    const games = (Array.isArray(d.games) ? d.games : [])
+      .filter((g) => g && PLAYERS.includes(g.first) && PLAYERS.includes(g.second) && typeof g.run === "number")
+      .slice(0, 3)
+      .map((g) => ({ ...g, animate: false })); // 復元した結果は回さず、そのまま表示
+    const drawn = new Set(games.map(pairKeyOf));
+    const skipped = (Array.isArray(d.skipped) ? d.skipped : []).filter((k) => PAIR_KEYS.includes(k) && !drawn.has(k));
+    return { games, skipped };
+  } catch {
+    return empty;
+  }
+}
+function saveDraw(games, skipped) {
+  try {
+    window.localStorage.setItem(
+      DRAW_STORE_KEY,
+      JSON.stringify({ games: games.map(({ animate, ...g }) => g), skipped })
+    );
+  } catch {}
+}
+
 function DrawTab({ roster, league }) {
-  const [games, setGames] = useState([]);      // 決まった試合（各試合に run 番号を付ける）
+  const initial = useRef(null);
+  if (initial.current === null) initial.current = loadDraw();
+  const [games, setGames] = useState(initial.current.games);       // 抽選して決まった試合
+  const [skipped, setSkipped] = useState(initial.current.skipped); // 手動で「消化済み」にした組み合わせ
   const [spinning, setSpinning] = useState(false);
   const [instant, setInstant] = useState(false);
   const runCounter = useRef(0);
   const timer = useRef(null);
   useEffect(() => () => clearTimeout(timer.current), []);
+  useEffect(() => { saveDraw(games, skipped); }, [games, skipped]);
 
-  const done = games.length >= 3;
-  const activeIndex = games.length - 1;
+  const drawnKeys = games.map(pairKeyOf);
+  const total = games.length + skipped.length;
+  const done = total >= 3;
 
   function drawOne() {
     if (spinning || done) return;
+    const next = drawNext(games, roster, skipped);
+    if (!next) return;
     clearTimeout(timer.current);
     runCounter.current += 1;
-    setGames((gs) => [...gs, { ...drawNext(gs, roster), run: runCounter.current }]);
+    const run = Date.now() * 10 + (runCounter.current % 10);
+    setGames((gs) => [...gs, { ...next, run, animate: true }]);
     setInstant(false);
     setSpinning(true);
-    const total = prefersReducedMotion() ? 0 : (REEL_BASE + REEL_STEP * (REEL_COUNT - 1)) * 1000 + 300;
-    timer.current = setTimeout(() => setSpinning(false), total);
+    const ms = prefersReducedMotion() ? 0 : (REEL_BASE + REEL_STEP * (REEL_COUNT - 1)) * 1000 + 300;
+    timer.current = setTimeout(() => setSpinning(false), ms);
   }
   function skip() {
     clearTimeout(timer.current);
@@ -349,65 +388,111 @@ function DrawTab({ roster, league }) {
     setSpinning(false);
   }
   function reset() {
+    if (!window.confirm("抽選結果を消して、最初からやり直しますか？")) return;
     clearTimeout(timer.current);
     setGames([]);
+    setSkipped([]);
     setSpinning(false);
     setInstant(false);
   }
+  // すでに消化した試合の組み合わせを選ぶ（残りの試合だけを抽選できる）。全員2試合ずつなので最大2つまで。
+  function toggleSkipped(k) {
+    if (spinning || drawnKeys.includes(k)) return;
+    setSkipped((cur) => {
+      if (cur.includes(k)) return cur.filter((x) => x !== k);
+      if (games.length + cur.length >= 2) return cur;
+      return [...cur, k];
+    });
+  }
 
   const dur = (k) => REEL_BASE + REEL_STEP * k;
-  const blank = { first: "?", second: "?", firstStarter: "?", secondStarter: "?", run: 0 };
-  const slots = [0, 1, 2].map((i) => games[i] || blank);
+  const last = games[games.length - 1];
+  const slots = [
+    ...skipped.map((k) => ({ kind: "skipped", k })),
+    ...games.map((g) => ({ kind: "drawn", g })),
+  ];
+  while (slots.length < 3) slots.push({ kind: "pending" });
+  const blank = { first: "?", second: "?", firstStarter: "?", secondStarter: "?" };
 
   return (
     <>
       <div className="pw-drawintro">
-        1試合ずつ決めます。3試合で全員がちょうど2試合ずつ戦います。先攻・後攻と先発（第{league}期のメンバー6人）は、毎回まったくのランダムです。
+        1試合ずつ決めます。3試合で全員がちょうど2試合ずつ戦います。先攻・後攻と先発（第{league}期のメンバー6人）は、毎回まったくのランダムです。結果は、リセットを押すまで残ります。
       </div>
 
-      {done ? (
-        <button className="pw-addbtn pw-spinbtn" onClick={reset}>最初からやり直す</button>
-      ) : (
-        <button className="pw-addbtn pw-spinbtn" onClick={drawOne} disabled={spinning}>
-          {spinning ? "抽選中…" : `🎰 第${games.length + 1}試合を決める`}
-        </button>
-      )}
-      {spinning && <button className="pw-backlatest" onClick={skip}>結果をすぐ表示</button>}
-      {!done && !spinning && games.length > 0 && (
-        <button className="pw-backlatest" onClick={reset}>最初からやり直す</button>
-      )}
+      <div className="pw-skipbox">
+        <div className="pw-skiptitle">すでに消化した試合</div>
+        <div className="pw-chips">
+          {PAIR_KEYS.map((k) => {
+            const isDrawn = drawnKeys.includes(k);
+            const on = isDrawn || skipped.includes(k);
+            const locked = isDrawn || spinning || (!on && total >= 2);
+            return (
+              <button
+                key={k}
+                className={`pw-chip${on ? " on" : ""}`}
+                disabled={locked}
+                aria-pressed={on}
+                onClick={() => toggleSkipped(k)}
+              >
+                {on ? "✓ " : ""}{pairLabel(k)}
+              </button>
+            );
+          })}
+        </div>
+        <div className="pw-skiphint">例: 2試合を消化済みにして「第3試合を決める」を押すと、残りの1試合だけを抽選できます。</div>
+      </div>
 
-      {slots.map((g, gi) => {
-        const pending = !g.run;
-        const inst = instant && gi === activeIndex;
+      <button className="pw-addbtn pw-spinbtn" onClick={drawOne} disabled={spinning || done}>
+        {done ? "3試合そろいました" : spinning ? "抽選中…" : `🎰 第${total + 1}試合を決める`}
+      </button>
+      {spinning && <button className="pw-backlatest" onClick={skip}>結果をすぐ表示</button>}
+
+      {slots.map((slot, gi) => {
+        if (slot.kind === "skipped") {
+          return (
+            <div className="pw-drawcard played" key={`s${slot.k}`}>
+              <div className="pw-drawhead">第{gi + 1}試合</div>
+              <div className="pw-playedrow"><b>{pairLabel(slot.k)}</b><span>消化済み</span></div>
+            </div>
+          );
+        }
+        const g = slot.kind === "drawn" ? slot.g : blank;
+        const pending = slot.kind === "pending";
+        const runId = !pending && g.animate ? g.run : 0;
+        const inst = instant && g === last;
         return (
-          <div className={`pw-drawcard${pending ? " pending" : ""}`} key={gi}>
+          <div className={`pw-drawcard${pending ? " pending" : ""}`} key={pending ? `p${gi}` : `g${g.run}`}>
             <div className="pw-drawhead">第{gi + 1}試合</div>
             <div className="pw-drawrow">
               <div className="pw-drawside">
                 <div className="pw-drawlabel first">先攻</div>
-                <Reel items={PLAYERS} finalValue={g.first} runId={g.run} duration={dur(0)} instant={inst} />
+                <Reel items={PLAYERS} finalValue={g.first} runId={runId} duration={dur(0)} instant={inst} />
               </div>
               <div className="pw-drawvs">vs</div>
               <div className="pw-drawside">
                 <div className="pw-drawlabel">後攻</div>
-                <Reel items={PLAYERS} finalValue={g.second} runId={g.run} duration={dur(1)} instant={inst} />
+                <Reel items={PLAYERS} finalValue={g.second} runId={runId} duration={dur(1)} instant={inst} />
               </div>
             </div>
             <div className="pw-drawrow">
               <div className="pw-drawside">
                 <div className="pw-drawlabel">先発</div>
-                <Reel small items={roster[g.first] || []} finalValue={g.firstStarter} runId={g.run} duration={dur(2)} instant={inst} />
+                <Reel small items={roster[g.first] || []} finalValue={g.firstStarter} runId={runId} duration={dur(2)} instant={inst} />
               </div>
               <div className="pw-drawvs"></div>
               <div className="pw-drawside">
                 <div className="pw-drawlabel">先発</div>
-                <Reel small items={roster[g.second] || []} finalValue={g.secondStarter} runId={g.run} duration={dur(3)} instant={inst} />
+                <Reel small items={roster[g.second] || []} finalValue={g.secondStarter} runId={runId} duration={dur(3)} instant={inst} />
               </div>
             </div>
           </div>
         );
       })}
+
+      {total > 0 && (
+        <button className="pw-resetbtn" onClick={reset}>リセット（抽選結果を消す）</button>
+      )}
     </>
   );
 }
@@ -1091,6 +1176,19 @@ ReactDOM.createRoot(document.getElementById("root")).render(<PawapuroScorebook /
   .pw-spinbtn:disabled { opacity: 0.6; cursor: default; }
   .pw-drawcard { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px 12px; margin-bottom: 10px; }
   .pw-drawcard.pending { opacity: 0.5; }
+  .pw-drawcard.played { padding-bottom: 10px; }
+  .pw-playedrow { display: flex; justify-content: space-between; align-items: center; font-size: 14px; color: var(--chalk); }
+  .pw-playedrow b { font-weight: 700; }
+  .pw-playedrow span { font-size: 11px; font-weight: 700; color: var(--chalk-dim); background: rgba(255,255,255,0.06); padding: 3px 8px; border-radius: 3px; }
+  .pw-skipbox { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; }
+  .pw-skiptitle { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; color: var(--chalk-dim); margin-bottom: 8px; }
+  .pw-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pw-chip { background: var(--field-deep); border: 1px solid var(--line); color: var(--chalk-dim); border-radius: 999px; padding: 7px 12px; font-size: 12px; font-weight: 700; font-family: inherit; cursor: pointer; }
+  .pw-chip.on { border-color: var(--amber-dim); color: var(--amber); background: rgba(240,168,59,0.1); }
+  .pw-chip:disabled { cursor: default; opacity: 0.5; }
+  .pw-chip.on:disabled { opacity: 0.85; }
+  .pw-skiphint { font-size: 10px; color: var(--chalk-dim); line-height: 1.5; margin-top: 8px; }
+  .pw-resetbtn { width: 100%; background: transparent; border: 1px solid var(--foul); color: var(--foul); border-radius: 4px; padding: 10px; font-size: 12px; font-weight: 700; letter-spacing: 0.03em; font-family: inherit; cursor: pointer; margin-top: 4px; }
   .pw-drawhead { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; color: var(--chalk-dim); margin-bottom: 8px; }
   .pw-drawrow { display: grid; grid-template-columns: 1fr 22px 1fr; gap: 6px; align-items: end; margin-bottom: 8px; }
   .pw-drawrow:last-child { margin-bottom: 0; }
