@@ -496,6 +496,17 @@ const NPB_TEAMS = [
 ];
 const ROUND_LABEL = { 1: "投手", 2: "野手", 3: "投手・野手どちらでも" };
 const DRAFT_ME_KEY = "pawapuro_me";
+const DRAFT_MINE_KEY = "pawapuro_draft_mine"; // 自分が入力した内容（この端末だけに保存。他の人を選んでも中身は見えない）
+const TEAM_REEL_SEC = 2.4;
+function loadMine() {
+  try { return JSON.parse(window.localStorage.getItem(DRAFT_MINE_KEY) || "null"); } catch { return null; }
+}
+function saveMine(v) {
+  try {
+    if (v) window.localStorage.setItem(DRAFT_MINE_KEY, JSON.stringify(v));
+    else window.localStorage.removeItem(DRAFT_MINE_KEY);
+  } catch {}
+}
 
 // 表記ゆれ（全角半角・空白・髙/高 など）をそろえて、被りを判定する
 const normName = (s) =>
@@ -526,12 +537,8 @@ function resolveRound(picks) {
 }
 
 function newDraftState() {
-  const order = [...NPB_TEAMS];
-  for (let i = order.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [order[i], order[j]] = [order[j], order[i]];
-  }
-  return { v: 1, order, teamIdx: 0, round: 1, picks: {}, owned: {}, banned: [], done: [], startedAt: new Date().toISOString() };
+  // 球団は、毎回スロットで1つずつ決める（残りの球団は画面に出さない）
+  return { v: 2, remaining: [...NPB_TEAMS], team: null, teamSpin: 0, teamIdx: 0, round: 1, picks: {}, owned: {}, banned: [], done: [], startedAt: new Date().toISOString() };
 }
 
 // その球団で、すでに獲得済み・被りで消えた選手は指名できない
@@ -546,7 +553,7 @@ function nameProblem(st, name) {
 }
 
 const STALE = "画面が古かったので更新しました。もう一度操作してください";
-const sameSpot = (cur, exp) => cur && cur.teamIdx === exp.teamIdx && cur.round === exp.round;
+const sameSpot = (cur, exp) => cur && cur.team && cur.teamIdx === exp.teamIdx && cur.round === exp.round;
 
 function applySubmit(cur, exp, player, pick) {
   if (!sameSpot(cur, exp) || cur.round > 3 || allIn(cur.picks)) return { error: STALE };
@@ -561,6 +568,14 @@ function applyRetract(cur, exp, player) {
   const picks = { ...(cur.picks || {}) };
   delete picks[player];
   return { next: { ...cur, picks } };
+}
+// 球団をランダムに1つ決める（誰が押しても、同時に押しても1回だけ決まる）
+function applyDrawTeam(cur, exp) {
+  if (!cur || cur.teamIdx !== exp.teamIdx || cur.team) return { error: "" }; // すでに決まっているときは何もしない
+  const rem = cur.remaining || [];
+  if (!rem.length) return { error: "すべての球団が終わっています" };
+  const team = rem[Math.floor(Math.random() * rem.length)];
+  return { next: { ...cur, team, remaining: rem.filter((t) => t !== team), teamSpin: Date.now() } };
 }
 // 3人そろった指名を確定して、次の巡へ進む
 function applyAdvance(cur, exp) {
@@ -592,9 +607,9 @@ function applyFill(cur, exp, player, name) {
 // この球団を終わりにして、次の球団へ
 function applyNextTeam(cur, exp) {
   if (!sameSpot(cur, exp) || cur.round !== 4) return { error: STALE };
-  const finished = { team: cur.order[cur.teamIdx], owned: {} };
+  const finished = { team: cur.team, owned: {} };
   PLAYERS.forEach((p) => { finished.owned[p] = (cur.owned || {})[p] || []; });
-  return { next: { ...cur, done: [...(cur.done || []), finished], teamIdx: cur.teamIdx + 1, round: 1, picks: {}, owned: {}, banned: [] } };
+  return { next: { ...cur, done: [...(cur.done || []), finished], team: null, teamIdx: cur.teamIdx + 1, round: 1, picks: {}, owned: {}, banned: [] } };
 }
 
 function DraftTab() {
@@ -611,6 +626,22 @@ function DraftTab() {
       return null;
     }
   });
+
+  // 球団が決まるときだけスロットを回す（開いた時点で決まっていた球団はそのまま表示）
+  const initSpin = useRef(undefined);
+  const [doneSpin, setDoneSpin] = useState(0);
+  useEffect(() => {
+    if (st === undefined || initSpin.current !== undefined) return;
+    initSpin.current = st ? st.teamSpin || 0 : 0;
+  }, [st]);
+  const animSpin =
+    st && st.teamSpin && initSpin.current !== undefined && st.teamSpin !== initSpin.current && !prefersReducedMotion() ? st.teamSpin : 0;
+  useEffect(() => {
+    if (!animSpin) return;
+    const t = setTimeout(() => setDoneSpin(animSpin), TEAM_REEL_SEC * 1000 + 500);
+    return () => clearTimeout(t);
+  }, [animSpin]);
+  const revealing = !!animSpin && doneSpin !== animSpin;
 
   useEffect(() => {
     let unsub = null;
@@ -658,7 +689,7 @@ function DraftTab() {
     return (
       <>
         <div className="pw-drawintro">
-          3人がそれぞれの端末で指名を入力します。全員の入力がそろった瞬間に、3人の画面で同時に公開されます。被りも自動で判定します。12球団の順番は、始めるときにランダムで決まります。
+          3人がそれぞれの端末で指名を入力します。全員の入力がそろった瞬間に、3人の画面で同時に公開されます。被りも自動で判定します。球団は、1球団ごとにスロットで決まります。
         </div>
         {mePicker}
         <button className="pw-addbtn pw-spinbtn" onClick={() => run((cur) => (cur ? { error: "すでに始まっています" } : { next: newDraftState() }))} disabled={busy}>
@@ -669,15 +700,29 @@ function DraftTab() {
     );
   }
 
-  const order = st.order || [];
-  const finished = st.teamIdx >= order.length;
+  // 古い形式のデータ（球団の順番を先に決める方式）は、やり直してもらう
+  if (!Array.isArray(st.remaining)) {
+    return (
+      <>
+        <div className="pw-drawintro">ドラフトの仕組みが新しくなりました。最初からやり直してください。</div>
+        <button className="pw-resetbtn" onClick={async () => { await window.fb.draftReset(); }}>ドラフトをやり直す</button>
+      </>
+    );
+  }
+  const total = NPB_TEAMS.length;
+  const finished = st.teamIdx >= total;
   const picks = st.picks || {};
   const owned = st.owned || {};
   const exp = { teamIdx: st.teamIdx, round: st.round };
   const everyone = allIn(picks);
   const res = everyone && st.round <= 3 ? resolveRound(picks) : null;
-  const myPick = me ? picks[me] : null;
-  const team = order[st.teamIdx];
+  const spot = `${st.teamIdx}-${st.round}`;
+  const team = st.team;
+  // 自分の入力内容は、この端末に残した記録があるときだけ表示・取り消しできる
+  const mineLocal = (() => {
+    const m = loadMine();
+    return m && me && m.player === me && m.spot === spot && picks[me] ? m : null;
+  })();
   const STATUS = { won: "獲得", clash: "被り", pass: "パス" };
 
   function submit(pass) {
@@ -688,7 +733,9 @@ function DraftTab() {
       if (bad) { setErr(bad); return; }
       if (name.length > 30) { setErr("選手名が長すぎます"); return; }
     }
-    run((cur) => applySubmit(cur, exp, me, pass ? { name: "", pass: true } : { name, pass: false })).then((ok) => { if (ok) setText(""); });
+    run((cur) => applySubmit(cur, exp, me, pass ? { name: "", pass: true } : { name, pass: false })).then((ok) => {
+      if (ok) { saveMine({ spot, player: me, name, pass: !!pass }); setText(""); }
+    });
   }
   function addFill() {
     const name = fillText.trim();
@@ -706,7 +753,7 @@ function DraftTab() {
 
   const history = (st.done || []).length > 0 && (
     <details className="pw-dr-hist">
-      <summary>終わった球団（{st.done.length}/{order.length}）</summary>
+      <summary>終わった球団（{st.done.length}/{total}）</summary>
       {st.done.map((d, i) => (
         <div className="pw-dr-histteam" key={i}>
           <div className="pw-dr-histname">{d.team}</div>
@@ -749,11 +796,37 @@ function DraftTab() {
   );
 
   const header = (
-    <>
-      <div className="pw-dr-team"><small>{st.teamIdx + 1} / {order.length} 球団目</small><div>{team}</div></div>
-      {st.teamIdx + 1 < order.length && <div className="pw-dr-next">次: {order[st.teamIdx + 1]}</div>}
-    </>
+    <div className="pw-dr-team">
+      <small>{st.teamIdx + 1} / {total} 球団目</small>
+      <Reel key={`team-${st.teamIdx}-${st.teamSpin}`} items={NPB_TEAMS} finalValue={team || "?"} runId={team ? animSpin : 0} duration={TEAM_REEL_SEC} />
+    </div>
   );
+
+  // --- 球団がまだ決まっていない: スロットで決める ---
+  if (!team) {
+    return (
+      <>
+        {mePicker}
+        {header}
+        <button className="pw-addbtn pw-spinbtn" onClick={() => run((cur) => applyDrawTeam(cur, exp))} disabled={busy}>
+          🎰 球団を決める
+        </button>
+        {err && <div className="pw-dr-err">{err}</div>}
+        {history}
+        <button className="pw-resetbtn" onClick={resetAll} disabled={busy}>ドラフトを最初からやり直す</button>
+      </>
+    );
+  }
+
+  // --- スロットが回っている間は、球団だけを見せる ---
+  if (revealing) {
+    return (
+      <>
+        {mePicker}
+        {header}
+      </>
+    );
+  }
 
   // --- 3巡終わり: コスト0の補充 ---
   if (st.round > 3) {
@@ -782,7 +855,7 @@ function DraftTab() {
         )}
         {err && <div className="pw-dr-err">{err}</div>}
         <button className="pw-addbtn pw-spinbtn" onClick={() => run((cur) => applyNextTeam(cur, exp))} disabled={busy}>
-          {st.teamIdx + 1 < order.length ? `この球団を終わって次へ（${order[st.teamIdx + 1]}）` : "ドラフトを終了する"}
+          {st.teamIdx + 1 < total ? "この球団を終わって次へ" : "ドラフトを終了する"}
         </button>
         {history}
         <button className="pw-resetbtn" onClick={resetAll} disabled={busy}>ドラフトを最初からやり直す</button>
@@ -807,10 +880,16 @@ function DraftTab() {
               </div>
             ))}
           </div>
-          {myPick ? (
+          {me && picks[me] ? (
             <div className="pw-dr-mine">
-              <div><small>あなたの指名</small><b>{myPick.pass ? "パス" : myPick.name}</b></div>
-              <button className="pw-backlatest" onClick={() => run((cur) => applyRetract(cur, exp, me))} disabled={busy}>取り消して入力しなおす</button>
+              {mineLocal ? (
+                <>
+                  <div><small>あなたの指名</small><b>{mineLocal.pass ? "パス" : mineLocal.name}</b></div>
+                  <button className="pw-backlatest" onClick={() => { run((cur) => applyRetract(cur, exp, me)).then((ok) => { if (ok) saveMine(null); }); }} disabled={busy}>取り消して入力しなおす</button>
+                </>
+              ) : (
+                <div><small>{me}</small><b>✓ 入力済み</b></div>
+              )}
               <div className="pw-dr-wait">みんなの入力を待っています。そろうと、全員の画面で同時に公開されます。</div>
             </div>
           ) : (
@@ -1558,8 +1637,9 @@ ReactDOM.createRoot(document.getElementById("root")).render(<PawapuroScorebook /
   .pw-dr-me { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; font-size: 12px; color: var(--chalk-dim); flex-wrap: wrap; }
   .pw-dr-team { text-align: center; margin-bottom: 2px; }
   .pw-dr-team small { display: block; font-size: 10px; letter-spacing: 0.08em; color: var(--chalk-dim); }
-  .pw-dr-team div { font-size: 20px; font-weight: 700; color: var(--chalk); letter-spacing: 0.03em; }
-  .pw-dr-next { text-align: center; font-size: 10px; color: var(--chalk-dim); margin-bottom: 10px; }
+  .pw-dr-team { margin-bottom: 12px; }
+  .pw-dr-team small { margin-bottom: 6px; }
+  .pw-dr-team .pw-reel-item { font-size: 20px; }
   .pw-dr-title { text-align: center; font-size: 22px; font-weight: 700; margin: 8px 0; }
   .pw-dr-roundtag { text-align: center; font-size: 12px; font-weight: 700; letter-spacing: 0.06em; color: #1a1206; background: var(--amber); border-radius: 4px; padding: 7px; margin-bottom: 12px; }
   .pw-dr-status { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
