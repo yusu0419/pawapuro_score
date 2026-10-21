@@ -657,6 +657,188 @@ function applyNextTeam(cur, exp) {
   return { next: { ...cur, done: [...(cur.done || []), finished], team: null, teamIdx: cur.teamIdx + 1, round: 1, picks: {}, owned: {}, banned: [] } };
 }
 
+// ================= 選手データ（能力を見る） =================
+// players.json（球団名 → 選手の配列）を、必要になったときに1回だけ読み込む。tools/build_players.py で作る。
+let playerDbPromise = null;
+function loadPlayerDb() {
+  if (!playerDbPromise) {
+    playerDbPromise = fetch("players.json?v=1")
+      .then((r) => { if (!r.ok) throw new Error("no data"); return r.json(); })
+      .catch(() => ({}));
+  }
+  return playerDbPromise;
+}
+function usePlayerDb() {
+  const [db, setDb] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    loadPlayerDb().then((d) => { if (alive) setDb(d); });
+    return () => { alive = false; };
+  }, []);
+  return db; // null=読み込み中 / {}=データなし
+}
+const half = (s) => String(s || "").normalize("NFKC");
+const rankOf = (v) => (v >= 90 ? "S" : v >= 80 ? "A" : v >= 70 ? "B" : v >= 60 ? "C" : v >= 50 ? "D" : v >= 40 ? "E" : v >= 30 ? "F" : "G");
+
+// 名前で探す（完全一致 → 前方一致 → 部分一致の順）
+function findPlayers(list, query, limit) {
+  const k = normName(query);
+  if (!k || !list) return [];
+  const exact = [], head = [], part = [];
+  list.forEach((p) => {
+    const n = normName(p.name);
+    if (n === k) exact.push(p);
+    else if (n.startsWith(k)) head.push(p);
+    else if (n.includes(k)) part.push(p);
+  });
+  return [...exact, ...head, ...part].slice(0, limit);
+}
+
+function Stat({ label, value, rank }) {
+  const r = rank ? rankOf(value) : "";
+  return (
+    <div className="pw-ps">
+      <small>{label}</small>
+      <b className={r ? `r-${r}` : ""}>{r}{value}</b>
+    </div>
+  );
+}
+
+function PlayerCard({ p }) {
+  const isP = p.kind === "P";
+  const grades = isP ? { ...(p.pgrades || {}), ...(p.fgrades || {}) } : p.grades || {};
+  const extra = [...(p.tags || []), ...(p.misc || [])];
+  return (
+    <div className="pw-pcard">
+      <div className="pw-pc-head">
+        <b>{p.name}</b>
+        <span>#{p.no}</span>
+        <span>{p.hand}</span>
+        <span className="pw-pc-pos">{isP ? `投手 ${p.role || ""}` : p.pos}</span>
+      </div>
+      {isP ? (
+        <>
+          <div className="pw-pc-stats three">
+            <div className="pw-ps"><small>球速</small><b>{p.velo}<em>km/h</em></b></div>
+            <Stat label="コントロール" value={p.ctrl} rank />
+            <Stat label="スタミナ" value={p.stam} rank />
+          </div>
+          <div className="pw-pc-sub">変化球</div>
+          <div className="pw-pc-chips">
+            {(p.pitches || []).map((x) => (
+              <span className={`pw-pchip${x.n === "ストレート" ? " base" : ""}`} key={x.slot}>{half(x.n)}{x.n === "ストレート" ? "" : <i>{x.amt}</i>}</span>
+            ))}
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="pw-pc-stats">
+            <div className="pw-ps"><small>弾道</small><b>{p.trj}</b></div>
+            <Stat label="ミート" value={p.meet} rank />
+            <Stat label="パワー" value={p.pow} rank />
+            <Stat label="走力" value={p.spd} rank />
+            <Stat label="肩力" value={p.arm} rank />
+            <Stat label="守備力" value={p.def} rank />
+            <Stat label="捕球" value={p.catch} rank />
+          </div>
+          <div className="pw-pc-sub">守備位置</div>
+          <div className="pw-pc-chips">
+            {Object.entries(p.defpos || {}).map(([pos, v]) => (
+              <span className="pw-pchip" key={pos}>{pos}<i className={`r-${rankOf(v)}`}>{rankOf(v)}{v}</i></span>
+            ))}
+          </div>
+        </>
+      )}
+      {(p.specials || []).length > 0 && (
+        <>
+          <div className="pw-pc-sub">特殊能力</div>
+          <div className="pw-pc-chips">
+            {p.specials.map((x) => <span className={`pw-pchip sp${x.neg ? " neg" : ""}`} key={x.n}>{half(x.n)}</span>)}
+          </div>
+        </>
+      )}
+      {Object.keys(grades).length > 0 && (
+        <div className="pw-pc-chips tight">
+          {Object.entries(grades).map(([k, v]) => <span className="pw-pchip" key={k}>{k}<i className={`r-${half(v)}`}>{half(v)}</i></span>)}
+        </div>
+      )}
+      {extra.length > 0 && <div className="pw-pc-extra">{extra.map(half).join(" / ")}</div>}
+    </div>
+  );
+}
+
+// 入力中の文字から選手候補を出す。名前がぴったり合ったら能力カードを出す。
+function PlayerSuggest({ list, query, st, onPick }) {
+  if (!list || !query.trim()) return null;
+  const k = normName(query);
+  const hits = findPlayers(list, query, 6);
+  const exact = hits.find((p) => normName(p.name) === k) || null;
+  return (
+    <div className="pw-sug">
+      {hits.length === 0 && <div className="pw-sug-none">この球団の選手データに、該当する選手がいません</div>}
+      {hits.map((p) => {
+        const taken = st ? nameProblem(st, p.name) : "";
+        return (
+          <button key={p.name} className={`pw-sug-row${exact === p ? " on" : ""}`} disabled={!!taken} onClick={() => onPick(p.name)}>
+            <b>{p.name}</b>
+            <span>{p.kind === "P" ? `投手 ${p.role || ""}` : p.pos}</span>
+            <span>{p.hand}</span>
+            {taken && <em>指名不可</em>}
+          </button>
+        );
+      })}
+      {exact && <PlayerCard p={exact} />}
+    </div>
+  );
+}
+
+// 選手の能力を調べるパネル（誰でも、いつでも使える）
+function PlayerLookup() {
+  const db = usePlayerDb();
+  const teams = db ? Object.keys(db) : [];
+  const [team, setTeam] = useState("");
+  const [q, setQ] = useState("");
+  const [sel, setSel] = useState(null);
+  const cur = team && db && db[team] ? team : teams[0] || "";
+  const list = cur ? db[cur] : [];
+  const hits = q.trim() ? findPlayers(list, q, 8) : list.slice(0, 0);
+  const picked = sel && list.find((p) => p.name === sel);
+  return (
+    <details className="pw-dr-hist pw-lookup">
+      <summary>選手の能力を調べる</summary>
+      {db === null && <div className="pw-sug-none">読み込み中…</div>}
+      {db !== null && teams.length === 0 && <div className="pw-sug-none">選手データを読み込めませんでした</div>}
+      {teams.length > 0 && (
+        <>
+          {teams.length > 1 ? (
+            <div className="pw-chips" style={{ margin: "8px 0" }}>
+              {teams.map((t) => <button key={t} className={`pw-chip${t === cur ? " on" : ""}`} onClick={() => { setTeam(t); setSel(null); }}>{t}</button>)}
+            </div>
+          ) : (
+            <div className="pw-sug-none" style={{ marginTop: 8 }}>{cur}（{list.length}人）</div>
+          )}
+          <input className="pw-dr-input pw-lk-input" value={q} onChange={(e) => { setQ(e.target.value); setSel(null); }} placeholder="選手名で検索" />
+          {hits.map((p) => (
+            <button key={p.name} className={`pw-sug-row${sel === p.name ? " on" : ""}`} onClick={() => setSel(p.name)}>
+              <b>{p.name}</b>
+              <span>{p.kind === "P" ? `投手 ${p.role || ""}` : p.pos}</span>
+              <span>{p.hand}</span>
+            </button>
+          ))}
+          {!q.trim() && (
+            <div className="pw-lk-all">
+              {list.map((p) => (
+                <button key={p.name} className={`pw-lk-name${sel === p.name ? " on" : ""}${p.kind === "P" ? " p" : ""}`} onClick={() => setSel(p.name)}>{p.name}</button>
+              ))}
+            </div>
+          )}
+          {picked && <PlayerCard p={picked} />}
+        </>
+      )}
+    </details>
+  );
+}
+
 function DraftTab() {
   const [st, setSt] = useState(undefined); // undefined=読み込み中 / null=まだ始まっていない
   const [err, setErr] = useState("");
@@ -666,6 +848,7 @@ function DraftTab() {
   const deviceId = useRef(null);
   if (deviceId.current === null) deviceId.current = getDeviceId();
   const [claims, setClaims] = useState(undefined); // どの名前をどの端末が使っているか
+  const playerDb = usePlayerDb(); // 選手データ（能力）
   const me = claims ? PLAYERS.find((p) => claims[p] === deviceId.current) || null : null;
 
   // 球団が決まるときだけスロットを回す（開いた時点で決まっていた球団はそのまま表示）
@@ -750,6 +933,8 @@ function DraftTab() {
     </div>
   );
 
+  const lookup = <PlayerLookup />;
+
   // --- まだ始まっていない ---
   if (st === null) {
     return (
@@ -762,6 +947,7 @@ function DraftTab() {
           ドラフトを始める
         </button>
         {err && <div className="pw-dr-err">{err}</div>}
+        {lookup}
       </>
     );
   }
@@ -837,6 +1023,7 @@ function DraftTab() {
       <>
         <div className="pw-dr-title">ドラフト終了 🎉</div>
         <div className="pw-drawintro">12球団すべて終わりました。</div>
+        {lookup}
         {history}
         <button className="pw-resetbtn" onClick={resetAll} disabled={busy}>新しいドラフトを始める（結果を消す）</button>
       </>
@@ -878,6 +1065,7 @@ function DraftTab() {
           🎰 球団を決める
         </button>
         {err && <div className="pw-dr-err">{err}</div>}
+        {lookup}
         {history}
         <button className="pw-resetbtn" onClick={resetAll} disabled={busy}>ドラフトを最初からやり直す</button>
       </>
@@ -919,10 +1107,12 @@ function DraftTab() {
             <button className="pw-dr-send" onClick={addFill} disabled={busy || !fillText.trim()}>追加</button>
           </div>
         )}
+        {me && (owned[me] || []).length < 3 && <PlayerSuggest list={(playerDb || {})[team]} query={fillText} st={st} onPick={setFillText} />}
         {err && <div className="pw-dr-err">{err}</div>}
         <button className="pw-addbtn pw-spinbtn" onClick={() => run((cur) => applyNextTeam(cur, exp))} disabled={busy}>
           {st.teamIdx + 1 < total ? "この球団を終わって次へ" : "ドラフトを終了する"}
         </button>
+        {lookup}
         {history}
         <button className="pw-resetbtn" onClick={resetAll} disabled={busy}>ドラフトを最初からやり直す</button>
       </>
@@ -971,6 +1161,7 @@ function DraftTab() {
                 />
                 <button className="pw-dr-send" onClick={() => submit(false)} disabled={busy || !me || !text.trim()}>指名</button>
               </div>
+              <PlayerSuggest list={(playerDb || {})[team]} query={text} st={st} onPick={setText} />
               <button className="pw-dr-pass" onClick={() => submit(true)} disabled={busy || !me}>指名しない（パス）</button>
             </>
           )}
@@ -996,6 +1187,7 @@ function DraftTab() {
 
       {err && <div className="pw-dr-err">{err}</div>}
       {ownedPanel}
+      {lookup}
       {history}
       <button className="pw-resetbtn" onClick={resetAll} disabled={busy}>ドラフトを最初からやり直す</button>
     </>
@@ -1699,6 +1891,43 @@ ReactDOM.createRoot(document.getElementById("root")).render(<PawapuroScorebook /
   .pw-spinbtn:disabled { opacity: 0.6; cursor: default; }
   .pw-drawcard { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px 12px; margin-bottom: 10px; }
   .pw-drawcard.pending { opacity: 0.5; }
+  .pw-sug { margin-bottom: 12px; }
+  .pw-sug-none { font-size: 11px; color: var(--chalk-dim); padding: 6px 2px; }
+  .pw-sug-row { width: 100%; display: flex; align-items: center; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; color: var(--chalk); padding: 9px 10px; margin-bottom: 4px; font-family: inherit; font-size: 13px; cursor: pointer; text-align: left; }
+  .pw-sug-row b { font-weight: 700; min-width: 4.5em; }
+  .pw-sug-row span { font-size: 11px; color: var(--chalk-dim); }
+  .pw-sug-row em { margin-left: auto; font-style: normal; font-size: 10px; font-weight: 700; color: var(--foul); }
+  .pw-sug-row.on { border-color: var(--amber); }
+  .pw-sug-row:disabled { opacity: 0.45; cursor: default; }
+  .pw-pcard { background: var(--field-deep); border: 1px solid var(--amber-dim); border-radius: 6px; padding: 10px 11px 11px; margin: 6px 0 4px; }
+  .pw-pc-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 8px; }
+  .pw-pc-head b { font-size: 18px; color: var(--amber); }
+  .pw-pc-head span { font-size: 11px; color: var(--chalk-dim); }
+  .pw-pc-head .pw-pc-pos { color: var(--chalk); font-weight: 700; }
+  .pw-pc-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-bottom: 8px; }
+  .pw-pc-stats.three { grid-template-columns: repeat(3, 1fr); }
+  .pw-ps { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 6px 2px; text-align: center; }
+  .pw-ps small { display: block; font-size: 9px; color: var(--chalk-dim); letter-spacing: 0.02em; margin-bottom: 2px; }
+  .pw-ps b { font-size: 16px; font-weight: 700; color: var(--chalk); }
+  .pw-ps b em { font-style: normal; font-size: 9px; color: var(--chalk-dim); margin-left: 1px; }
+  .r-S, .r-A { color: var(--amber) !important; }
+  .r-B, .r-C { color: var(--chalk) !important; }
+  .r-D, .r-E, .r-F, .r-G { color: #8f9c90 !important; }
+  .pw-pc-sub { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; color: var(--chalk-dim); margin: 8px 0 4px; }
+  .pw-pc-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+  .pw-pc-chips.tight { margin-top: 8px; }
+  .pw-pchip { font-size: 11px; font-weight: 700; padding: 4px 8px; border-radius: 999px; background: rgba(255,255,255,0.06); color: var(--chalk); border: 1px solid var(--line); }
+  .pw-pchip i { font-style: normal; margin-left: 5px; color: var(--amber); }
+  .pw-pchip.base { color: var(--chalk-dim); }
+  .pw-pchip.sp { background: rgba(86,150,214,0.16); border-color: rgba(86,150,214,0.4); }
+  .pw-pchip.sp.neg { background: rgba(209,84,74,0.16); border-color: rgba(209,84,74,0.5); }
+  .pw-pc-extra { margin-top: 8px; font-size: 10px; color: var(--chalk-dim); line-height: 1.5; }
+  .pw-lookup { margin-top: 4px; }
+  .pw-lk-input { width: 100%; margin: 8px 0; }
+  .pw-lk-all { display: flex; flex-wrap: wrap; gap: 5px; }
+  .pw-lk-name { background: var(--field-deep); border: 1px solid var(--line); color: var(--chalk-dim); border-radius: 4px; padding: 6px 9px; font-size: 12px; font-family: inherit; cursor: pointer; }
+  .pw-lk-name.p { color: var(--chalk); }
+  .pw-lk-name.on { border-color: var(--amber); color: var(--amber); }
   .pw-hbtns { display: flex; gap: 8px; }
   .pw-dr-me { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; font-size: 12px; color: var(--chalk-dim); flex-wrap: wrap; }
   .pw-dr-change { margin: 0 0 0 4px; }
