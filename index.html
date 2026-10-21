@@ -50,6 +50,7 @@
   const db = getFirestore(app);
   const gamesRef = doc(db, "pawapuro", "games");
   const draftRef = doc(db, "pawapuro", "draft");
+  const claimsRef = doc(db, "pawapuro", "draft_claims"); // 「どの端末がどの名前を使っているか」
 
   // 既存データ（league / rosters が無い古い形式）も壊さずに読み込む
   function normalize(data) {
@@ -99,8 +100,25 @@
         return r.error ? { error: r.error } : { ok: true };
       });
     },
+    claimsSubscribe(callback, onError) {
+      return onSnapshot(
+        claimsRef,
+        (snap) => callback(snap.exists() ? snap.data() : {}),
+        (e) => { if (onError) onError(e); }
+      );
+    },
+    async claimsTx(mutator) {
+      return runTransaction(db, async (tx) => {
+        const snap = await tx.get(claimsRef);
+        const r = mutator(snap.exists() ? snap.data() : {}) || {};
+        if (r.next) tx.set(claimsRef, r.next);
+        return r.error ? { error: r.error } : { ok: true };
+      });
+    },
+    // やり直すときは、名前の使用状況も消す（スマホを替えた・データを消したときの復旧にもなる）
     async draftReset() {
       await deleteDoc(draftRef);
+      await deleteDoc(claimsRef);
     },
   };
   window.dispatchEvent(new Event("fb-ready"));
@@ -495,7 +513,34 @@ const NPB_TEAMS = [
   "福岡ソフトバンクホークス", "北海道日本ハムファイターズ", "オリックス・バファローズ", "千葉ロッテマリーンズ", "埼玉西武ライオンズ", "東北楽天ゴールデンイーグルス",
 ];
 const ROUND_LABEL = { 1: "投手", 2: "野手", 3: "投手・野手どちらでも" };
-const DRAFT_ME_KEY = "pawapuro_me";
+const DRAFT_DEVICE_KEY = "pawapuro_device"; // この端末の目印（名前の取り合いを防ぐ）
+let memDeviceId = null;
+function getDeviceId() {
+  try {
+    let v = window.localStorage.getItem(DRAFT_DEVICE_KEY);
+    if (!v) {
+      v = "d" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+      window.localStorage.setItem(DRAFT_DEVICE_KEY, v);
+    }
+    return v;
+  } catch {
+    if (!memDeviceId) memDeviceId = "m" + Math.random().toString(36).slice(2);
+    return memDeviceId;
+  }
+}
+// 1つの名前は1つの端末だけが使える。1つの端末が使える名前は1つだけ。
+function applyClaim(cur, player, dev) {
+  const claims = { ...((cur && cur.claims) || {}) };
+  if (claims[player] && claims[player] !== dev) return { error: `${player}は、ほかの端末で使われています` };
+  if (PLAYERS.some((q) => q !== player && claims[q] === dev)) return { error: "この端末は、すでに別の名前で使っています" };
+  claims[player] = dev;
+  return { next: { claims } };
+}
+function applyRelease(cur, player, dev) {
+  const claims = { ...((cur && cur.claims) || {}) };
+  if (claims[player] === dev) delete claims[player];
+  return { next: { claims } };
+}
 const DRAFT_MINE_KEY = "pawapuro_draft_mine"; // 自分が入力した内容（この端末だけに保存。他の人を選んでも中身は見えない）
 const TEAM_REEL_SEC = 2.4;
 function loadMine() {
@@ -618,14 +663,10 @@ function DraftTab() {
   const [busy, setBusy] = useState(false);
   const [text, setText] = useState("");
   const [fillText, setFillText] = useState("");
-  const [me, setMe] = useState(() => {
-    try {
-      const v = window.localStorage.getItem(DRAFT_ME_KEY);
-      return PLAYERS.includes(v) ? v : null;
-    } catch {
-      return null;
-    }
-  });
+  const deviceId = useRef(null);
+  if (deviceId.current === null) deviceId.current = getDeviceId();
+  const [claims, setClaims] = useState(undefined); // どの名前をどの端末が使っているか
+  const me = claims ? PLAYERS.find((p) => claims[p] === deviceId.current) || null : null;
 
   // 球団が決まるときだけスロットを回す（開いた時点で決まっていた球団はそのまま表示）
   const initSpin = useRef(undefined);
@@ -645,17 +686,28 @@ function DraftTab() {
 
   useEffect(() => {
     let unsub = null;
+    let unsub2 = null;
     const start = () => {
       unsub = window.fb.draftSubscribe(setSt, () => setErr("ドラフトの情報を読み込めませんでした"));
+      unsub2 = window.fb.claimsSubscribe((d) => setClaims((d && d.claims) || {}), () => setErr("ドラフトの情報を読み込めませんでした"));
     };
     if (window.fb) start();
     else window.addEventListener("fb-ready", start, { once: true });
-    return () => { if (unsub) unsub(); };
+    return () => { if (unsub) unsub(); if (unsub2) unsub2(); };
   }, []);
 
-  function chooseMe(p) {
-    setMe(p);
-    try { window.localStorage.setItem(DRAFT_ME_KEY, p); } catch {}
+  async function claimName(p) {
+    setErr("");
+    try {
+      const r = await window.fb.claimsTx((cur) => applyClaim(cur, p, deviceId.current));
+      if (r && r.error) setErr(r.error);
+    } catch {
+      setErr("通信に失敗しました。もう一度試してください");
+    }
+  }
+  async function releaseName() {
+    if (!window.confirm(`この端末の「${me}」の名前を解除しますか？（別の名前を選び直せます）`)) return;
+    try { await window.fb.claimsTx((cur) => applyRelease(cur, me, deviceId.current)); } catch { setErr("通信に失敗しました。もう一度試してください"); }
   }
   async function run(mutator) {
     setBusy(true);
@@ -672,15 +724,29 @@ function DraftTab() {
     return ok;
   }
 
-  if (st === undefined) return <div className="pw-drawintro">読み込み中…</div>;
+  if (st === undefined || claims === undefined) return <div className="pw-drawintro">読み込み中…</div>;
 
-  // --- 自分は誰か ---
-  const mePicker = (
+  // --- 自分は誰か（1つの名前は1つの端末だけ。ドラフトの最中は変更できない） ---
+  const draftRunning = !!st && !(Array.isArray(st.remaining) && st.teamIdx >= NPB_TEAMS.length);
+  const mePicker = me ? (
     <div className="pw-dr-me">
       <span>あなたは</span>
-      {PLAYERS.map((p) => (
-        <button key={p} className={`pw-chip${me === p ? " on" : ""}`} onClick={() => chooseMe(p)} aria-pressed={me === p}>{p}</button>
-      ))}
+      <span className="pw-chip on">{me}</span>
+      {!draftRunning && <button className="pw-backlatest pw-dr-change" onClick={releaseName}>名前を変更</button>}
+      {draftRunning && <small className="pw-dr-hint">ドラフトの最中は、名前を変更できません。</small>}
+    </div>
+  ) : (
+    <div className="pw-dr-me">
+      <span>あなたは</span>
+      {PLAYERS.map((p) => {
+        const taken = !!claims[p];
+        return (
+          <button key={p} className="pw-chip" onClick={() => claimName(p)} disabled={taken} title={taken ? "ほかの端末で使用中" : ""}>
+            {p}{taken ? "（使用中）" : ""}
+          </button>
+        );
+      })}
+      <small className="pw-dr-hint">自分の名前を選ぶと、この端末はその名前に固定されます。ほかの人の名前では入力できません。</small>
     </div>
   );
 
@@ -1635,6 +1701,8 @@ ReactDOM.createRoot(document.getElementById("root")).render(<PawapuroScorebook /
   .pw-drawcard.pending { opacity: 0.5; }
   .pw-hbtns { display: flex; gap: 8px; }
   .pw-dr-me { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; font-size: 12px; color: var(--chalk-dim); flex-wrap: wrap; }
+  .pw-dr-change { margin: 0 0 0 4px; }
+  .pw-dr-hint { width: 100%; font-size: 10px; color: var(--chalk-dim); line-height: 1.5; }
   .pw-dr-team { text-align: center; margin-bottom: 2px; }
   .pw-dr-team small { display: block; font-size: 10px; letter-spacing: 0.08em; color: var(--chalk-dim); }
   .pw-dr-team { margin-bottom: 12px; }
