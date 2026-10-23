@@ -106,6 +106,7 @@ def parse_card(c):
     if kind == "P":
         d["form"] = info[1]
         d["season"] = stats[:5]  # 防御率 勝 敗 HP S
+        d["bseason"] = stats[5:9]  # 野手としての成績（打率 本塁打 打点 盗塁）。投手成績とは別物
         pit = elems(g[1])
         d["velo"] = int(pit[0].text()); d["ctrl"] = int(pit[1].text()); d["stam"] = int(pit[2].text())
         q = {}

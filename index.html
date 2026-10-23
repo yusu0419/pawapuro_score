@@ -1,6 +1,9 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Kosugi+Maru&family=M+PLUS+Rounded+1c:wght@100;400;700&display=swap" rel="stylesheet">
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>パワスタ — 左座・長谷川・正覚 成績帳</title>
@@ -662,7 +665,7 @@ function applyNextTeam(cur, exp) {
 let playerDbPromise = null;
 function loadPlayerDb() {
   if (!playerDbPromise) {
-    playerDbPromise = fetch("players.json?v=1")
+    playerDbPromise = fetch("players.json?v=2")
       .then((r) => { if (!r.ok) throw new Error("no data"); return r.json(); })
       .catch(() => ({}));
   }
@@ -774,18 +777,18 @@ function PitchChart({ pitches }) {
 // 能力セルの表（5列。上から 評価2行・特殊能力4行・（少し空けて）緑の特殊能力3行）
 const cellFont = (t, budget) => Math.max(6.5, Math.min(12, budget / Math.max(1, [...t].length)));
 function GCell({ c }) {
-  if (!c) return <div className="pw-cell e" />;
+  if (!c) return <div className="pw-gc e" />;
   if (c.kind === "g") {
     const g = half(c.g);
     return (
-      <div className={`pw-cell g${c.hl ? " hl" : ""}`}>
+      <div className={`pw-gc g${c.hl ? " hl" : ""}`}>
         <span style={{ fontSize: cellFont(c.n, 40) }}>{c.n}</span>
         <em>{g}</em>
       </div>
     );
   }
   const t = half(c.n);
-  return <div className={`pw-cell ${c.kind}`}><span style={{ fontSize: cellFont(t, 56) }}>{t}</span></div>;
+  return <div className={`pw-gc ${c.kind}`}><span style={{ fontSize: cellFont(t, 56) }}>{t}</span></div>;
 }
 function fillRows(list, rows) {
   const total = Math.max(rows, Math.ceil(list.length / 5)) * 5;
@@ -813,14 +816,45 @@ function AbilityGrid({ grades, specials, tags }) {
   );
 }
 
+// 名前プレートの色はポジション適性: 先発=赤、中継ぎ・抑え=ピンク、捕手=青、内野手=黄、外野手=緑（複数あれば組み合わせ）
+const PLATE = {
+  red: ["#ef8f86", "#d9534f"], pink: ["#f093db", "#d84fc9"],
+  blue: ["#8cc4f2", "#3f86d8"], yellow: ["#f6de7c", "#c9a227"], green: ["#9ddc8c", "#4aa84a"],
+};
+function plateKeys(p) {
+  const keys = [];
+  if (p.kind === "P") {
+    const r = p.role ? p.role.main + (p.role.sub || "") : "";
+    if (r.includes("先")) keys.push("red");
+    if (r.includes("中") || r.includes("抑")) keys.push("pink");
+  } else {
+    const pos = p.pos || "";
+    if (pos.includes("捕")) keys.push("blue");
+    if (/[一二三遊]/.test(pos)) keys.push("yellow");
+    if (pos.includes("外")) keys.push("green");
+  }
+  return keys.length ? keys : ["blue"];
+}
+function plateStyle(p) {
+  const keys = plateKeys(p);
+  const cols = keys.map((k) => PLATE[k][0]);
+  const n = cols.length;
+  const bg = n === 1
+    ? cols[0]
+    : `linear-gradient(100deg, ${cols.map((c, i) => `${c} ${Math.round((i / n) * 100 + (i ? 6 : 0))}%, ${c} ${Math.round(((i + 1) / n) * 100 - (i < n - 1 ? 6 : 0))}%`).join(", ")})`;
+  return { background: bg, borderColor: PLATE[keys[n - 1]][1] };
+}
+
 function PlayerCard({ p }) {
   const isP = p.kind === "P";
   const [tab, setTab] = useState(isP ? "pit" : "bat");
-  const tabs = isP ? [["pit", "投手能力"], ["bat", "野手能力"], ["def", "守備力"]] : [["bat", "野手能力"], ["def", "守備力"]];
+  const tabs = isP ? [["pit", "投手能力"], ["bat", "野手能力"], ["def", "ポジション適性"]] : [["bat", "野手能力"], ["def", "ポジション適性"]];
+  // 投手の成績（防御率・勝敗）と、野手としての成績（打率など）は別のデータ
   const sn = p.season || [];
+  const bn = isP ? p.bseason || [] : sn;
   const season = isP && tab === "pit"
     ? `防${sn[0] || "---"}　${sn[1] || "--"}勝　${sn[2] || "--"}敗　${sn[3] || "--"}HP　${sn[4] || "-"}S`
-    : `打${sn[0] || "---"}　${sn[1] || "--"}本　${sn[2] || "--"}点　${sn[3] || "--"}盗`;
+    : `打${bn[0] || "---"}　${bn[1] || "--"}本　${bn[2] || "--"}点　${bn[3] || "--"}盗`;
   const info = isP && tab === "pit" ? `${p.form}　${p.hand}` : `${p.type}　${p.hand}`;
   const chars = [...p.name];
   const defs = [["投手", "投"], ["捕手", "捕"], ["一塁", "一"], ["二塁", "二"], ["三塁", "三"], ["遊撃", "遊"], ["外野", "外"]];
@@ -833,7 +867,7 @@ function PlayerCard({ p }) {
       </div>
       <div className="pw-g-body">
         <div className="pw-g-top">
-          <div className="pw-g-plate" style={{ letterSpacing: chars.length <= 3 ? "0.45em" : "0.05em" }}>{p.name}</div>
+          <div className="pw-g-plate" style={{ letterSpacing: chars.length <= 3 ? "0.45em" : "0.05em", ...plateStyle(p) }}>{p.name}</div>
           <div className="pw-g-no">{p.no}</div>
           <div className="pw-g-info">{info}</div>
         </div>
@@ -2011,9 +2045,10 @@ ReactDOM.createRoot(document.getElementById("root")).render(<PawapuroScorebook /
   .pw-sug-row em { margin-left: auto; font-style: normal; font-size: 10px; font-weight: 700; color: var(--foul); }
   .pw-sug-row.on { border-color: var(--amber); }
   .pw-sug-row:disabled { opacity: 0.45; cursor: default; }
-  .pw-g { margin: 8px 0 4px; }
+  .pw-g { margin: 8px 0 4px; font-family: "Kosugi Maru", "M PLUS Rounded 1c", sans-serif; font-weight: 400; }
+  .pw-g button, .pw-g b, .pw-g em { font-family: inherit; }
   .pw-g-tabs { display: flex; gap: 4px; padding-left: 2px; }
-  .pw-g-tab { border: 0; border-radius: 9px 9px 0 0; padding: 7px 12px 6px; font-size: 13px; font-weight: 700; font-family: inherit; cursor: pointer; color: rgba(255,255,255,0.55); }
+  .pw-g-tab { border: 0; border-radius: 9px 9px 0 0; padding: 7px 12px 6px; font-size: 13px; font-weight: 400; font-family: inherit; cursor: pointer; color: rgba(255,255,255,0.55); }
   .pw-g-tab.pit { background: #6d2528; }
   .pw-g-tab.bat { background: #2a4560; }
   .pw-g-tab.def { background: #4a4327; }
@@ -2024,39 +2059,37 @@ ReactDOM.createRoot(document.getElementById("root")).render(<PawapuroScorebook /
   .pw-g.t-bat .pw-g-body { border-color: #2f6fb3; }
   .pw-g.t-def .pw-g-body { border-color: #7a6a2f; }
   .pw-g-top { display: grid; grid-template-columns: auto 44px 1fr; gap: 5px; align-items: stretch; margin-bottom: 5px; }
-  .pw-g-plate { min-width: 84px; padding: 5px 10px; text-align: center; font-size: 17px; font-weight: 700; color: #222; border: 2px solid #d84fc9; border-radius: 6px; background: linear-gradient(90deg, #ef928b 0%, #f093db 55%, #f093db 100%); display: flex; align-items: center; justify-content: center; }
-  .pw-g.t-bat .pw-g-plate { border-color: #4a86d0; background: linear-gradient(90deg, #8fc7f0, #93a8f0); }
-  .pw-g.t-def .pw-g-plate { border-color: #b08a2c; background: linear-gradient(90deg, #f0cf8a, #e8b66a); }
+  .pw-g-plate { min-width: 84px; padding: 5px 10px; text-align: center; font-size: 17px; font-weight: 400; color: #222; border: 2px solid #d84fc9; border-radius: 6px; background: linear-gradient(90deg, #ef928b 0%, #f093db 55%, #f093db 100%); display: flex; align-items: center; justify-content: center; }
   .pw-g-no { background: #fff; border: 2px solid #3881d3; border-radius: 3px 3px 8px 8px; display: flex; align-items: center; justify-content: center; font-size: 18px; color: #222; }
   .pw-g-info { background: #f6f7f8; border: 2px solid #9fcbe6; border-radius: 9px; padding: 4px 4px; display: flex; align-items: center; justify-content: center; font-size: 11px; letter-spacing: -0.02em; white-space: nowrap; overflow: hidden; color: #222; text-align: center; }
   .pw-g-info.wide { margin-bottom: 5px; padding: 5px 8px; font-size: 13px; letter-spacing: 0.01em; }
   .pw-g-row4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin-bottom: 5px; }
   .pw-gbox { background: #f6f7f8; border: 2px solid #9fcbe6; border-radius: 10px; padding: 5px 3px 6px; text-align: center; }
   .pw-gbox.dim { opacity: 0.55; }
-  .pw-glabel { display: inline-block; min-width: 82%; background: #fff; border: 1.5px solid #8fb5d4; border-radius: 5px; font-size: 10px; font-weight: 700; color: #306898; padding: 1px 2px; letter-spacing: 0.04em; white-space: nowrap; }
+  .pw-glabel { display: inline-block; min-width: 82%; background: #fff; border: 1.5px solid #8fb5d4; border-radius: 5px; font-size: 10px; font-weight: 400; color: #306898; padding: 1px 2px; letter-spacing: 0.04em; white-space: nowrap; }
   .pw-gval { margin-top: 5px; min-height: 36px; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-  .pw-g-speed { font-size: 22px; font-weight: 500; color: #111; line-height: 1.05; }
+  .pw-g-speed { font-size: 22px; font-weight: 400; color: #111; line-height: 1.05; }
   .pw-g-speed small { display: block; font-size: 9px; color: #333; text-align: right; }
   .pw-g-rv { display: flex; align-items: baseline; gap: 3px; }
-  .pw-g-rv b { font-size: 22px; font-weight: 500; color: #111; }
+  .pw-g-rv b { font-size: 22px; font-weight: 400; color: #111; }
   .pw-rk { font-size: 24px; font-weight: 900; font-style: italic; -webkit-text-stroke: 3px #fff; paint-order: stroke fill; text-shadow: 1.5px 1.5px 0 rgba(0,0,0,0.28); line-height: 1; }
   .pw-g-none { color: #8a98aa; font-size: 20px; }
   .pw-g-role { display: flex; align-items: baseline; justify-content: center; gap: 1px; color: #111; }
-  .pw-g-role b { font-size: 24px; font-weight: 500; }
+  .pw-g-role b { font-size: 24px; font-weight: 400; }
   .pw-g-role span { font-size: 15px; }
   .pw-g-role i { font-style: normal; font-size: 12px; color: #667; margin-left: 2px; }
   .pw-g-chart { background: #f6f7f8; border: 2px solid #9fcbe6; border-radius: 10px; padding: 4px 2px 2px; margin-bottom: 5px; }
   .pw-g-chartsvg { display: block; width: 100%; height: auto; }
   .pw-g-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 3px; }
   .pw-g-gap { grid-column: 1 / -1; height: 4px; }
-  .pw-cell { height: 26px; border-radius: 5px; display: flex; align-items: center; justify-content: center; overflow: hidden; white-space: nowrap; font-weight: 500; color: #111; border: 1.5px solid #b4dbe8; background: linear-gradient(90deg, #f6fdff 80%, #d3f1f8 80%); }
-  .pw-cell.b { background: #b8f6fd; border-color: #62bfe6; }
-  .pw-cell.r { background: #f6d4dc; border-color: #e5808f; }
-  .pw-cell.t { background: #d8fae2; border-color: #55b96e; }
-  .pw-cell.g { justify-content: space-between; padding: 0 0 0 4px; background: #f6fdff; border-color: #a4cfdc; }
-  .pw-cell.g em { font-style: normal; font-size: 12px; align-self: stretch; display: flex; align-items: center; padding: 0 5px; background: #d3f1f8; }
-  .pw-cell.g.hl { background: #b8f6fd; border-color: #62bfe6; }
-  .pw-cell.g.hl em { background: #72deef; }
+  .pw-gc { height: 26px; border-radius: 5px; display: flex; align-items: center; justify-content: center; overflow: hidden; white-space: nowrap; font-weight: 400; color: #111; border: 1.5px solid #b4dbe8; background: linear-gradient(90deg, #f6fdff 80%, #d3f1f8 80%); }
+  .pw-gc.b { background: #b8f6fd; border-color: #62bfe6; }
+  .pw-gc.r { background: #f6d4dc; border-color: #e5808f; }
+  .pw-gc.t { background: #d8fae2; border-color: #55b96e; }
+  .pw-gc.g { justify-content: space-between; padding: 0 0 0 4px; background: #f6fdff; border-color: #a4cfdc; }
+  .pw-gc.g em { font-style: normal; font-size: 12px; align-self: stretch; display: flex; align-items: center; padding: 0 5px; background: #d3f1f8; }
+  .pw-gc.g.hl { background: #b8f6fd; border-color: #62bfe6; }
+  .pw-gc.g.hl em { background: #72deef; }
   .pw-lookup { margin-top: 4px; }
   .pw-lk-input { width: 100%; margin: 8px 0; }
   .pw-lk-all { display: flex; flex-wrap: wrap; gap: 5px; }
