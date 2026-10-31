@@ -698,7 +698,7 @@ function findPlayers(list, query, limit) {
 }
 
 // ランクの色（パワプロの画面に合わせる。B・C・D は実際の画面から採色）
-const RANK_COLOR = { S: "#e8a400", A: "#e5412f", B: "#d02848", C: "#e09830", D: "#a0b038", E: "#3fa65a", F: "#3f8fd6", G: "#8896aa" };
+const RANK_COLOR = { S: "#e8a400", A: "#e61bc4", B: "#e0143c", C: "#e88a10", D: "#c8b400", E: "#3cc000", F: "#10a0f0", G: "#8896aa" };
 const roleText = (p) => (p.role ? p.role.main + p.role.sub : "");
 function Rk({ v }) {
   const r = rankOf(v);
